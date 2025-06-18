@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from typing import List
 from datetime import datetime
 import logging
@@ -90,7 +91,7 @@ async def health_check(db: Session = Depends(get_db)):
     """Verificar estado de la aplicación"""
     try:
         # Probar consulta simple
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         return {
             "status": "healthy",
             "database": "connected",
