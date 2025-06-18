@@ -9,11 +9,33 @@ from .config import settings
 from .models import Usuario, MedallaOlimpica, TerminoExcluido, ConfiguracionPrompt
 from .schemas import ChatRequest, ChatResponse
 
-# Configurar logging
+# Configurar logging más detallado
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Cliente de Anthropic
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+# ========== LOGS DE DIAGNÓSTICO ==========
+def log_anthropic_config():
+    """Diagnosticar configuración de Anthropic"""
+    print("\n🔍 === DIAGNÓSTICO ANTHROPIC ===")
+    print(f"API Key configurada: {'✅ SÍ' if settings.anthropic_api_key else '❌ NO'}")
+    if settings.anthropic_api_key:
+        print(f"API Key (primeros 20 chars): {settings.anthropic_api_key[:20]}...")
+        print(f"API Key (últimos 10 chars): ...{settings.anthropic_api_key[-10:]}")
+        print(f"Longitud total: {len(settings.anthropic_api_key)} caracteres")
+    print(f"Modelo configurado: {settings.anthropic_model}")
+    print("================================\n")
+
+# Llamar al diagnóstico al importar el módulo
+log_anthropic_config()
+
+# Cliente de Anthropic con logs
+try:
+    print("🔄 Intentando crear cliente de Anthropic...")
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    print("✅ Cliente de Anthropic creado exitosamente")
+except Exception as e:
+    print(f"❌ Error al crear cliente de Anthropic: {e}")
+    client = None
 
 # Estructura de la tabla principal (basada en tu ExtraerCSV_Olimpiadas.py)
 ESTRUCTURA_TABLA_OLIMPICA = """
@@ -83,6 +105,14 @@ def obtener_consulta_sql(pregunta: str, prompt_contexto: str) -> str:
     """
     Generar consulta SQL usando Claude (basado en ejemploProfe.py)
     """
+    print(f"\n🤖 === LLAMADA A ANTHROPIC ===")
+    print(f"Pregunta recibida: {pregunta}")
+    print(f"Modelo a usar: {settings.anthropic_model}")
+    
+    # Verificar cliente
+    if client is None:
+        raise Exception("Cliente de Anthropic no inicializado")
+    
     prompt = f"""{prompt_contexto}
 
 Dada la siguiente estructura de tabla:
@@ -112,6 +142,8 @@ Genera una consulta SQL para PostgreSQL que responda la pregunta del usuario. Si
 Responde solo con la consulta SQL, sin agregar nada más."""
 
     try:
+        print("🔄 Enviando request a Anthropic...")
+        
         message = client.messages.create(
             model=settings.anthropic_model,
             max_tokens=1000,
@@ -124,7 +156,9 @@ Responde solo con la consulta SQL, sin agregar nada más."""
             ]
         )
         
+        print("✅ Respuesta recibida de Anthropic")
         sql_query = message.content[0].text.strip()
+        print(f"SQL generado: {sql_query}")
         
         # Limpiar la respuesta en caso de que incluya texto extra
         if "```sql" in sql_query:
@@ -134,7 +168,18 @@ Responde solo con la consulta SQL, sin agregar nada más."""
             
         return sql_query
         
+    except anthropic.APIError as e:
+        print(f"❌ Error de API de Anthropic: {e}")
+        print(f"Tipo de error: {type(e)}")
+        print(f"Código de estado: {getattr(e, 'status_code', 'N/A')}")
+        raise Exception(f"Error de API de Anthropic: {str(e)}")
+    except anthropic.AuthenticationError as e:
+        print(f"❌ Error de autenticación Anthropic: {e}")
+        print("🔍 Verificar API key...")
+        raise Exception(f"Error de autenticación Anthropic: {str(e)}")
     except Exception as e:
+        print(f"❌ Error general al llamar Anthropic: {e}")
+        print(f"Tipo de error: {type(e)}")
         logger.error(f"Error al generar SQL con Claude: {e}")
         raise Exception(f"Error al generar consulta SQL: {str(e)}")
 
@@ -170,6 +215,8 @@ def generar_respuesta_final(resultados_sql: List[Dict], pregunta: str, prompt_co
     """
     Generar respuesta natural usando Claude (basado en ejemploProfe.py)
     """
+    print(f"\n🤖 === GENERANDO RESPUESTA FINAL ===")
+    
     prompt = f"""{prompt_contexto}
 
 Dada la siguiente pregunta:
@@ -197,6 +244,8 @@ Genera una respuesta en lenguaje natural, entendible para un usuario interesado 
 """
 
     try:
+        print("🔄 Generando respuesta natural...")
+        
         message = client.messages.create(
             model=settings.anthropic_model,
             max_tokens=1000,
@@ -209,6 +258,7 @@ Genera una respuesta en lenguaje natural, entendible para un usuario interesado 
             ]
         )
         
+        print("✅ Respuesta natural generada")
         return message.content[0].text.strip()
         
     except Exception as e:
@@ -225,6 +275,10 @@ def procesar_consulta_chat(
     Función principal para procesar consulta del chat (Criterios A + D + E + F)
     """
     try:
+        print(f"\n🎯 === PROCESANDO CONSULTA ===")
+        print(f"Usuario: {usuario.username}")
+        print(f"Pregunta: {pregunta}")
+        
         # 1. Obtener configuración de prompt por contexto (Criterio F)
         prompt_contexto = obtener_prompt_contexto(db, contexto)
         
@@ -258,6 +312,8 @@ def procesar_consulta_chat(
             "sql_ejecutado": sql_query
         }
         
+        print("✅ Consulta procesada exitosamente")
+        
         return {
             "respuesta": respuesta_final,
             "consulta_sql": sql_query,
@@ -267,6 +323,7 @@ def procesar_consulta_chat(
         
     except Exception as e:
         logger.error(f"Error en procesamiento de chat: {e}")
+        print(f"❌ Error en procesamiento: {e}")
         return {
             "respuesta": f"Ocurrió un error al procesar tu consulta: {str(e)}",
             "consulta_sql": None,
