@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     
     # Configuración CORS (para React frontend)
-    allowed_origins: str = "http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000"
+    allowed_origins: str = "http://localhost:3000,http://localhost:5173,http://localhost:8080,http://127.0.0.1:3000,http://127.0.0.1:5173"
     
     @property
     def allowed_origins_list(self) -> List[str]:

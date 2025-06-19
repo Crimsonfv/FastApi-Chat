@@ -48,13 +48,32 @@ app = FastAPI(
 # Configurar CORS para React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins_list,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",    # ✅ Puerto de Vite
+        "http://127.0.0.1:3000", 
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["*"],           # ✅ CRÍTICO: incluye OPTIONS
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # ==================== EVENTOS DE INICIO ====================
+@app.options("/auth/{path:path}")
+async def auth_options_handler(path: str):
+    """Manejar explícitamente OPTIONS para rutas de auth"""
+    return {"message": "OK"}
+
+@app.get("/debug/cors-info")
+async def debug_cors_info():
+    """Debug: verificar configuración CORS"""
+    return {
+        "cors_enabled": True,
+        "backend_running": True,
+        "timestamp": datetime.now().isoformat()
+    }
 
 @app.on_event("startup")
 async def startup_event():
