@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from fastapi import HTTPException, status
@@ -151,6 +151,29 @@ def agregar_mensaje(db: Session, conversacion_id: int, mensaje: MensajeCreate) -
     
     return MensajeResponse.model_validate(db_mensaje)
 
+def obtener_historial_conversacion(db: Session, conversacion_id: int, limite: int = 10) -> List[Dict[str, Any]]:
+    """
+    Obtener historial reciente de una conversación para proporcionar contexto al AI.
+    Retorna los últimos mensajes en formato simplificado.
+    """
+    mensajes = db.query(Mensaje).filter(
+        Mensaje.id_conversacion == conversacion_id
+    ).order_by(desc(Mensaje.timestamp)).limit(limite).all()
+    
+    # Invertir para tener orden cronológico (más antiguo primero)
+    mensajes = mensajes[::-1]
+    
+    historial = []
+    for mensaje in mensajes:
+        historial.append({
+            "rol": mensaje.rol,
+            "contenido": mensaje.contenido,
+            "timestamp": mensaje.timestamp.isoformat() if mensaje.timestamp else None,
+            "consulta_sql": mensaje.consulta_sql
+        })
+    
+    return historial
+
 def procesar_mensaje_chat(db: Session, usuario: Usuario, chat_request: ChatRequest) -> ChatResponse:
     """
     Procesar mensaje de chat completo - integra chat.py con conversations.py (Criterio A + B + D)
@@ -189,10 +212,13 @@ def procesar_mensaje_chat(db: Session, usuario: Usuario, chat_request: ChatReque
         )
     )
     
-    # 2. Procesar consulta con IA
-    resultado_chat = procesar_consulta_chat(db, usuario, chat_request.pregunta)
+    # 2. Obtener historial de conversación para contexto
+    historial_conversacion = obtener_historial_conversacion(db, conversacion_id)
     
-    # 3. Guardar respuesta del asistente
+    # 3. Procesar consulta con IA incluyendo historial
+    resultado_chat = procesar_consulta_chat(db, usuario, chat_request.pregunta, historial_conversacion)
+    
+    # 4. Guardar respuesta del asistente
     mensaje_asistente = agregar_mensaje(
         db,
         conversacion_id,
@@ -203,7 +229,7 @@ def procesar_mensaje_chat(db: Session, usuario: Usuario, chat_request: ChatReque
         )
     )
     
-    # 4. Preparar respuesta
+    # 5. Preparar respuesta
     return ChatResponse(
         respuesta=resultado_chat["respuesta"],
         consulta_sql=resultado_chat["consulta_sql"],

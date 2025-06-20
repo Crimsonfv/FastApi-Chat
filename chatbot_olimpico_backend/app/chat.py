@@ -101,7 +101,7 @@ def filtrar_pregunta_por_terminos_excluidos(pregunta: str, terminos_excluidos: L
     pregunta_filtrada = " ".join(pregunta_filtrada.split())
     return pregunta_filtrada
 
-def obtener_consulta_sql(pregunta: str, prompt_contexto: str) -> str:
+def obtener_consulta_sql(pregunta: str, prompt_contexto: str, historial_conversacion: List[Dict] = None) -> str:
     """
     Generar consulta SQL usando Claude (basado en ejemploProfe.py)
     """
@@ -113,17 +113,36 @@ def obtener_consulta_sql(pregunta: str, prompt_contexto: str) -> str:
     if client is None:
         raise Exception("Cliente de Anthropic no inicializado")
     
+    # Construir contexto de conversación si existe
+    contexto_conversacion = ""
+    if historial_conversacion and len(historial_conversacion) > 0:
+        contexto_conversacion = "\n\nCONTEXTO DE CONVERSACIÓN PREVIA:\n"
+        for mensaje in historial_conversacion:
+            if mensaje["rol"] == "user":
+                contexto_conversacion += f"Usuario preguntó: \"{mensaje['contenido']}\"\n"
+            elif mensaje["rol"] == "assistant":
+                # Truncar solo si es extremadamente largo, pero preservar más contexto
+                contenido_assistant = mensaje['contenido']
+                if len(contenido_assistant) > 800:
+                    contenido_assistant = contenido_assistant[:800] + "..."
+                contexto_conversacion += f"Asistente respondió: \"{contenido_assistant}\"\n"
+                if mensaje.get("consulta_sql"):
+                    contexto_conversacion += f"SQL ejecutado: {mensaje['consulta_sql']}\n"
+        contexto_conversacion += "\nFIN DEL CONTEXTO PREVIO\n"
+    
     prompt = f"""{prompt_contexto}
 
 Dada la siguiente estructura de tabla:
 {ESTRUCTURA_TABLA_OLIMPICA}
-
+{contexto_conversacion}
 Y la siguiente consulta en lenguaje natural:
 "{pregunta}"
 
 Genera una consulta SQL para PostgreSQL que responda la pregunta del usuario. Sigue estas pautas:
 
 0. La tabla se llama medallas_olimpicas.
+0.1. IMPORTANTE: Si hay contexto de conversación previa, usa esa información para interpretar referencias como "el país anterior", "ese atleta", "la medalla mencionada", etc.
+0.2. Las referencias contextuales deben resolverse usando la información del historial de conversación.
 1. Utiliza ILIKE para búsquedas de texto insensibles a mayúsculas/minúsculas.
 2. Para búsquedas de nombres de atletas, puedes usar tanto 'athlete' (formato original) como 'nombre_completo' (formato procesado).
 3. Al buscar nombres completos usa ILIKE con comodines %. Para búsquedas específicas usa AND entre nombres y apellidos.
@@ -138,6 +157,14 @@ Genera una consulta SQL para PostgreSQL que responda la pregunta del usuario. Si
 12. IMPORTANTE: Solo genera consultas SELECT. No generes DDL (CREATE, DROP) o DML (INSERT, UPDATE, DELETE).
 13. Para filtros por medallas usa: medal = 'Gold', medal = 'Silver', medal = 'Bronze'.
 14. Para filtros por género usa: gender = 'Men' o gender = 'Women'.
+15. CRÍTICO para PostgreSQL: En STRING_AGG con DISTINCT, el ORDER BY debe usar las mismas columnas que DISTINCT.
+    - ✅ Correcto: STRING_AGG(DISTINCT sport, ', ' ORDER BY sport)
+    - ❌ Incorrecto: STRING_AGG(DISTINCT sport, ', ' ORDER BY year)
+    - ✅ Alternativa: STRING_AGG(DISTINCT CONCAT(year, ' - ', city), ', ' ORDER BY CONCAT(year, ' - ', city))
+16. Para evitar errores de agregación con DISTINCT:
+    - Si necesitas ordenar por una columna diferente, inclúyela en la expresión DISTINCT
+    - O usa subconsultas para ordenamiento complejo
+    - O omite ORDER BY en STRING_AGG si no es esencial
 
 Responde solo con la consulta SQL, sin agregar nada más."""
 
@@ -185,9 +212,12 @@ Responde solo con la consulta SQL, sin agregar nada más."""
 
 def ejecutar_sql(db: Session, sql_query: str) -> List[Dict]:
     """
-    Ejecutar consulta SQL en PostgreSQL
+    Ejecutar consulta SQL en PostgreSQL con manejo de errores y rollback
     """
     try:
+        # Iniciar transacción
+        logger.info(f"Ejecutando SQL: {sql_query}")
+        
         result = db.execute(text(sql_query))
         
         # Convertir resultado a lista de diccionarios
@@ -205,19 +235,57 @@ def ejecutar_sql(db: Session, sql_query: str) -> List[Dict]:
                 row_dict[column] = value
             resultados.append(row_dict)
             
+        logger.info(f"SQL ejecutado exitosamente. Resultados: {len(resultados)} filas")
         return resultados
         
     except Exception as e:
-        logger.error(f"Error al ejecutar SQL: {e}")
-        raise Exception(f"Error en la consulta: {str(e)}")
+        # Rollback automático en caso de error
+        try:
+            db.rollback()
+            logger.info("Rollback ejecutado correctamente")
+        except Exception as rollback_error:
+            logger.error(f"Error en rollback: {rollback_error}")
+        
+        # Clasificar tipos de errores para mejor manejo
+        error_message = str(e).lower()
+        
+        if "invalidcolumnreference" in error_message or "order by expressions must appear" in error_message:
+            logger.error(f"Error de sintaxis PostgreSQL en STRING_AGG/DISTINCT: {e}")
+            raise Exception("Error de sintaxis SQL: Las expresiones ORDER BY en agregaciones con DISTINCT deben aparecer en la lista de argumentos")
+        elif "syntax error" in error_message:
+            logger.error(f"Error de sintaxis SQL: {e}")
+            raise Exception(f"Error de sintaxis en la consulta SQL: {str(e)}")
+        elif "column" in error_message and "does not exist" in error_message:
+            logger.error(f"Error de columna inexistente: {e}")
+            raise Exception(f"Error: Columna inexistente en la consulta: {str(e)}")
+        else:
+            logger.error(f"Error general al ejecutar SQL: {e}")
+            raise Exception(f"Error en la consulta: {str(e)}")
 
-def generar_respuesta_final(resultados_sql: List[Dict], pregunta: str, prompt_contexto: str) -> str:
+def generar_respuesta_final(resultados_sql: List[Dict], pregunta: str, prompt_contexto: str, historial_conversacion: List[Dict] = None) -> str:
     """
     Generar respuesta natural usando Claude (basado en ejemploProfe.py)
     """
     print(f"\n🤖 === GENERANDO RESPUESTA FINAL ===")
     
+    # Construir contexto de conversación si existe
+    contexto_conversacion = ""
+    if historial_conversacion and len(historial_conversacion) > 0:
+        contexto_conversacion = "\n\nCONTEXTO DE CONVERSACIÓN PREVIA:\n"
+        for mensaje in historial_conversacion:
+            if mensaje["rol"] == "user":
+                contexto_conversacion += f"Usuario preguntó: \"{mensaje['contenido']}\"\n"
+            elif mensaje["rol"] == "assistant":
+                # Truncar solo si es extremadamente largo, pero preservar más contexto
+                contenido_assistant = mensaje['contenido']
+                if len(contenido_assistant) > 800:
+                    contenido_assistant = contenido_assistant[:800] + "..."
+                contexto_conversacion += f"Asistente respondió: \"{contenido_assistant}\"\n"
+        contexto_conversacion += "\nFIN DEL CONTEXTO PREVIO\n"
+    
     prompt = f"""{prompt_contexto}
+
+{contexto_conversacion}
 
 Dada la siguiente pregunta:
 "{pregunta}"
@@ -228,6 +296,7 @@ Y los siguientes resultados de la consulta SQL:
 Genera una respuesta en lenguaje natural, entendible para un usuario interesado en datos olímpicos con las siguientes reglas:
 
 1. Responde directamente sin hacer mención a SQL u otros términos técnicos.
+1.1. IMPORTANTE: Si hay contexto de conversación previa, refiérete a él de manera natural cuando sea relevante (ej: "Como mencionamos antes sobre Chile...", "Siguiendo con el tema anterior...").
 2. Usa un lenguaje claro, profesional, como si estuvieses conversando con el usuario.
 3. Presenta la información de manera organizada y fácil de entender.
 4. Si los datos son limitados, proporciona una respuesta con la información disponible.
@@ -269,6 +338,7 @@ def procesar_consulta_chat(
     db: Session, 
     usuario: Usuario, 
     pregunta: str,
+    historial_conversacion: List[Dict] = None,
     contexto: str = "deportivo"
 ) -> Dict[str, Any]:
     """
@@ -296,14 +366,14 @@ def procesar_consulta_chat(
                 "error": True
             }
         
-        # 4. Generar SQL con Claude (Criterio A + D)
-        sql_query = obtener_consulta_sql(pregunta_filtrada, prompt_contexto)
+        # 4. Generar SQL con Claude (Criterio A + D) - incluyendo historial para contexto
+        sql_query = obtener_consulta_sql(pregunta_filtrada, prompt_contexto, historial_conversacion)
         
         # 5. Ejecutar SQL (Criterio D)
         resultados_sql = ejecutar_sql(db, sql_query)
         
-        # 6. Generar respuesta natural con Claude (Criterio A)
-        respuesta_final = generar_respuesta_final(resultados_sql, pregunta_filtrada, prompt_contexto)
+        # 6. Generar respuesta natural con Claude (Criterio A) - incluyendo historial para contexto
+        respuesta_final = generar_respuesta_final(resultados_sql, pregunta_filtrada, prompt_contexto, historial_conversacion)
         
         # 7. Preparar datos de contexto para modal (Criterio G)
         datos_contexto = {
