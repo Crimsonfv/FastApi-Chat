@@ -79,12 +79,23 @@ def obtener_terminos_excluidos(db: Session, usuario: Usuario) -> List[str]:
     """
     Obtener términos excluidos del usuario (Criterio E)
     """
+    print(f"\n🔍 === CONSULTANDO TÉRMINOS EXCLUIDOS EN BD ===")
+    print(f"Buscando términos para usuario_id: {usuario.id}")
+    
     terminos = db.query(TerminoExcluido).filter(
         TerminoExcluido.id_usuario == usuario.id,
         TerminoExcluido.activo == True
     ).all()
     
-    return [termino.termino.lower() for termino in terminos]
+    print(f"Términos encontrados en BD: {len(terminos)}")
+    for termino in terminos:
+        print(f"  - ID: {termino.id}, Término: '{termino.termino}', Activo: {termino.activo}")
+    
+    resultado = [termino.termino.lower() for termino in terminos]
+    print(f"Lista final retornada: {resultado}")
+    print("==========================================\n")
+    
+    return resultado
 
 def filtrar_pregunta_por_terminos_excluidos(pregunta: str, terminos_excluidos: List[str]) -> str:
     """
@@ -101,7 +112,75 @@ def filtrar_pregunta_por_terminos_excluidos(pregunta: str, terminos_excluidos: L
     pregunta_filtrada = " ".join(pregunta_filtrada.split())
     return pregunta_filtrada
 
-def obtener_consulta_sql(pregunta: str, prompt_contexto: str, historial_conversacion: List[Dict] = None) -> str:
+def filtrar_resultados_por_terminos_excluidos(resultados_sql: List[Dict], terminos_excluidos: List[str]) -> List[Dict]:
+    """
+    Filtrar resultados SQL removiendo filas que contengan términos excluidos (Criterio E)
+    """
+    print(f"\n🔒 === FUNCIÓN FILTRAR_RESULTADOS LLAMADA ===")
+    print(f"Función filtrar_resultados_por_terminos_excluidos() EJECUTÁNDOSE")
+    print(f"Recibido - resultados_sql: {len(resultados_sql) if resultados_sql else 0} filas")
+    print(f"Recibido - terminos_excluidos: {terminos_excluidos}")
+    
+    if not terminos_excluidos or not resultados_sql:
+        print(f"⚠️ SALIDA TEMPRANA: terminos_excluidos={bool(terminos_excluidos)}, resultados_sql={bool(resultados_sql)}")
+        print("===================================\n")
+        return resultados_sql
+    
+    print(f"🔍 PROCESANDO FILTRADO:")
+    print(f"  - Resultados originales: {len(resultados_sql)} filas")
+    print(f"  - Términos a excluir: {terminos_excluidos}")
+    
+    resultados_filtrados = []
+    filas_removidas = 0
+    filas_procesadas = 0
+    
+    for fila_index, fila in enumerate(resultados_sql):
+        filas_procesadas += 1
+        fila_contiene_termino_excluido = False
+        
+        # Debug: Mostrar contenido de las primeras filas
+        if fila_index < 3:
+            print(f"\n  🔍 Examinando fila {fila_index}: {fila}")
+        
+        for columna, valor in fila.items():
+            if valor is None:
+                continue
+                
+            # Convertir valor a string para búsqueda
+            valor_str = str(valor).lower()
+            
+            # Verificar cada término excluido
+            for termino in terminos_excluidos:
+                termino_lower = termino.lower().strip()
+                if termino_lower and termino_lower in valor_str:
+                    print(f"    🚫 MATCH ENCONTRADO en fila {fila_index}:")
+                    print(f"       Término: '{termino}' → Valor: '{valor}' (columna: {columna})")
+                    fila_contiene_termino_excluido = True
+                    break
+            
+            if fila_contiene_termino_excluido:
+                break
+        
+        # Solo agregar la fila si no contiene términos excluidos
+        if not fila_contiene_termino_excluido:
+            resultados_filtrados.append(fila)
+            if fila_index < 3:
+                print(f"    ✅ Fila {fila_index} INCLUIDA (no contiene términos excluidos)")
+        else:
+            filas_removidas += 1
+            if fila_index < 10:  # Mostrar las primeras 10 filas removidas
+                print(f"    ❌ Fila {fila_index} REMOVIDA")
+    
+    print(f"\n📊 RESUMEN DEL FILTRADO:")
+    print(f"  - Filas procesadas: {filas_procesadas}")
+    print(f"  - Filas incluidas: {len(resultados_filtrados)}")
+    print(f"  - Filas removidas: {filas_removidas}")
+    print(f"  - Términos que causaron filtrado: {terminos_excluidos}")
+    print("===================================\n")
+    
+    return resultados_filtrados
+
+def obtener_consulta_sql(pregunta: str, prompt_contexto: str, historial_conversacion: List[Dict] = None, terminos_excluidos: List[str] = None) -> str:
     """
     Generar consulta SQL usando Claude (basado en ejemploProfe.py)
     """
@@ -130,11 +209,30 @@ def obtener_consulta_sql(pregunta: str, prompt_contexto: str, historial_conversa
                     contexto_conversacion += f"SQL ejecutado: {mensaje['consulta_sql']}\n"
         contexto_conversacion += "\nFIN DEL CONTEXTO PREVIO\n"
     
+    # Construir sección de términos excluidos si existen
+    seccion_terminos_excluidos = ""
+    if terminos_excluidos and len(terminos_excluidos) > 0:
+        terminos_formateados = ", ".join([f"'{termino}'" for termino in terminos_excluidos])
+        seccion_terminos_excluidos = f"""
+TÉRMINOS EXCLUIDOS POR EL USUARIO:
+El usuario ha especificado que NO desea ver resultados que contengan los siguientes términos: {terminos_formateados}
+
+INSTRUCCIONES CRÍTICAS PARA FILTRADO:
+- DEBES excluir automáticamente de los resultados SQL cualquier fila que contenga estos términos excluidos
+- Los términos pueden aparecer en cualquier campo (país, atleta, ciudad, deporte, etc.)
+- Maneja variaciones del término (mayúsculas/minúsculas, espacios, plurales, sinónimos comunes)
+- Usa condiciones WHERE con NOT ILIKE para excluir estos términos
+- Para múltiples términos excluidos, usa AND para combinar todas las exclusiones
+- Ejemplo: WHERE country NOT ILIKE '%término1%' AND athlete NOT ILIKE '%término2%' AND sport NOT ILIKE '%término3%'
+- Aplica las exclusiones a TODAS las columnas relevantes donde estos términos podrían aparecer
+
+"""
+    
     prompt = f"""{prompt_contexto}
 
 Dada la siguiente estructura de tabla:
 {ESTRUCTURA_TABLA_OLIMPICA}
-{contexto_conversacion}
+{contexto_conversacion}{seccion_terminos_excluidos}
 Y la siguiente consulta en lenguaje natural:
 "{pregunta}"
 
@@ -354,32 +452,55 @@ def procesar_consulta_chat(
         
         # 2. Obtener términos excluidos del usuario (Criterio E)
         terminos_excluidos = obtener_terminos_excluidos(db, usuario)
+        print(f"\n🔒 === DEBUG TÉRMINOS EXCLUIDOS ===")
+        print(f"Usuario ID: {usuario.id}")
+        print(f"Usuario: {usuario.username}")
+        print(f"Términos excluidos obtenidos: {terminos_excluidos}")
+        print(f"Cantidad de términos: {len(terminos_excluidos)}")
+        print("=====================================\n")
         
-        # 3. Filtrar pregunta por términos excluidos (Criterio E)
-        pregunta_filtrada = filtrar_pregunta_por_terminos_excluidos(pregunta, terminos_excluidos)
+        # 3. Los términos excluidos ahora se manejan directamente en la generación de SQL
+        # No es necesario filtrar la pregunta previamente
+        print(f"📝 Pregunta original: '{pregunta}'")
+        print(f"🎯 Términos excluidos se integrarán en SQL: {terminos_excluidos}")
         
-        if not pregunta_filtrada.strip():
-            return {
-                "respuesta": "La pregunta contiene solo términos excluidos. Por favor, reformula tu consulta.",
-                "consulta_sql": None,
-                "datos_contexto": None,
-                "error": True
-            }
-        
-        # 4. Generar SQL con Claude (Criterio A + D) - incluyendo historial para contexto
-        sql_query = obtener_consulta_sql(pregunta_filtrada, prompt_contexto, historial_conversacion)
+        # 4. Generar SQL con Claude (Criterio A + D) - incluyendo historial para contexto y términos excluidos
+        sql_query = obtener_consulta_sql(pregunta, prompt_contexto, historial_conversacion, terminos_excluidos)
         
         # 5. Ejecutar SQL (Criterio D)
         resultados_sql = ejecutar_sql(db, sql_query)
+        print(f"\n📊 === DEBUG RESULTADOS SQL ===")
+        print(f"Resultados SQL sin filtrar: {len(resultados_sql)} filas")
+        if resultados_sql:
+            print(f"Primera fila de ejemplo: {resultados_sql[0]}")
+            # Buscar específicamente Brazil/Brasil en los resultados
+            brasil_found = []
+            for i, fila in enumerate(resultados_sql[:10]):  # Solo primeras 10 filas
+                for key, value in fila.items():
+                    if value and 'brazil' in str(value).lower():
+                        brasil_found.append(f"Fila {i}, columna '{key}': {value}")
+            if brasil_found:
+                print(f"🚨 BRAZIL ENCONTRADO EN RESULTADOS SQL:")
+                for found in brasil_found:
+                    print(f"  - {found}")
+        print("===============================\n")
         
-        # 6. Generar respuesta natural con Claude (Criterio A) - incluyendo historial para contexto
-        respuesta_final = generar_respuesta_final(resultados_sql, pregunta_filtrada, prompt_contexto, historial_conversacion)
+        # 6. Los términos excluidos ahora se manejan directamente en la generación de SQL
+        # No es necesario filtrar post-SQL ya que el AI genera SQL con exclusiones integradas
+        print(f"\n✅ === FILTRADO INTEGRADO EN SQL ===")
+        print(f"Términos excluidos manejados por AI en SQL: {terminos_excluidos}")
+        print(f"Resultados SQL ya filtrados: {len(resultados_sql)}")
+        print("=====================================\n")
         
-        # 7. Preparar datos de contexto para modal (Criterio G)
+        # 7. Generar respuesta natural con Claude (Criterio A) - incluyendo historial para contexto
+        respuesta_final = generar_respuesta_final(resultados_sql, pregunta, prompt_contexto, historial_conversacion)
+        
+        # 8. Preparar datos de contexto para modal (Criterio G)
         datos_contexto = {
             "total_resultados": len(resultados_sql),
             "muestra_datos": resultados_sql[:5] if resultados_sql else [],
-            "sql_ejecutado": sql_query
+            "sql_ejecutado": sql_query,
+            "terminos_excluidos_aplicados": len(terminos_excluidos) if terminos_excluidos else 0
         }
         
         print("✅ Consulta procesada exitosamente")
