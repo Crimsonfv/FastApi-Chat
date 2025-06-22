@@ -37,6 +37,12 @@ class UsuarioLogin(BaseModel):
     username: str
     password: str
 
+class UsuarioUpdate(BaseModel):
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None
+    rol: Optional[RolUsuario] = None
+    activo: Optional[bool] = None
+
 class UsuarioResponse(UsuarioBase):
     id: int
     fecha_registro: datetime

@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 import logging
 
@@ -12,7 +12,7 @@ from .database import get_db, test_connection, init_db
 from .models import Usuario, TerminoExcluido, ConfiguracionPrompt
 from .schemas import (
     # Auth schemas
-    UsuarioCreate, UsuarioLogin, UsuarioResponse, Token,
+    UsuarioCreate, UsuarioLogin, UsuarioResponse, UsuarioUpdate, Token,
     # Conversation schemas  
     ConversacionCreate, ConversacionResponse, ConversacionConMensajes,
     # Chat schemas
@@ -290,6 +290,239 @@ async def eliminar_termino_excluido(
     return SuccessResponse(message="Término eliminado exitosamente")
 
 # ==================== ENDPOINTS DE ADMINISTRACIÓN (Criterio F) ====================
+
+# Admin - User Management
+@app.get("/admin/users", response_model=List[UsuarioResponse])
+async def listar_usuarios(
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Listar todos los usuarios (solo admin)"""
+    usuarios = db.query(Usuario).all()
+    return [UsuarioResponse.model_validate(u) for u in usuarios]
+
+@app.get("/admin/users/{user_id}", response_model=UsuarioResponse)
+async def obtener_usuario_admin(
+    user_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Obtener detalles de un usuario (solo admin)"""
+    usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado"
+        )
+    return UsuarioResponse.model_validate(usuario)
+
+@app.put("/admin/users/{user_id}", response_model=UsuarioResponse)
+async def actualizar_usuario_admin(
+    user_id: int,
+    user_update: UsuarioUpdate,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Actualizar usuario (solo admin)"""
+    usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado"
+        )
+    
+    # Actualizar campos permitidos
+    if user_update.username is not None:
+        # Verificar que el nuevo username no exista
+        existing = db.query(Usuario).filter(
+            Usuario.username == user_update.username,
+            Usuario.id != user_id
+        ).first()
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El username ya está en uso"
+            )
+        usuario.username = user_update.username
+    
+    if user_update.email is not None:
+        # Verificar que el nuevo email no exista
+        existing = db.query(Usuario).filter(
+            Usuario.email == user_update.email,
+            Usuario.id != user_id
+        ).first()
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El email ya está en uso"
+            )
+        usuario.email = user_update.email
+    
+    if user_update.rol is not None:
+        usuario.rol = user_update.rol
+    
+    if user_update.activo is not None:
+        usuario.activo = user_update.activo
+    
+    db.commit()
+    db.refresh(usuario)
+    return UsuarioResponse.model_validate(usuario)
+
+@app.delete("/admin/users/{user_id}", response_model=SuccessResponse)
+async def eliminar_usuario_admin(
+    user_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Eliminar usuario (solo admin)"""
+    if user_id == current_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No puedes eliminar tu propia cuenta"
+        )
+    
+    usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado"
+        )
+    
+    # Soft delete: desactivar usuario en lugar de eliminarlo
+    usuario.activo = False
+    db.commit()
+    return SuccessResponse(message="Usuario eliminado exitosamente")
+
+# Admin - Conversation Management
+@app.get("/admin/conversations")
+async def listar_todas_conversaciones(
+    skip: int = 0,
+    limit: int = 100,
+    user_id: Optional[int] = None,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Listar todas las conversaciones (solo admin)"""
+    from .models import Conversacion
+    
+    query = db.query(Conversacion).join(Usuario)
+    
+    if user_id:
+        query = query.filter(Conversacion.id_usuario == user_id)
+    
+    conversaciones = query.offset(skip).limit(limit).all()
+    
+    result = []
+    for conv in conversaciones:
+        result.append({
+            "id": conv.id,
+            "titulo": conv.titulo,
+            "fecha_inicio": conv.fecha_inicio,
+            "fecha_ultima_actividad": conv.fecha_ultima_actividad,
+            "activa": conv.activa,
+            "usuario": {
+                "id": conv.usuario.id,
+                "username": conv.usuario.username,
+                "email": conv.usuario.email
+            }
+        })
+    
+    return result
+
+@app.get("/admin/conversations/{conversation_id}")
+async def obtener_conversacion_admin(
+    conversation_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Obtener conversación específica con mensajes (solo admin)"""
+    from .models import Conversacion, Mensaje
+    
+    conversacion = db.query(Conversacion).filter(
+        Conversacion.id == conversation_id
+    ).first()
+    
+    if not conversacion:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversación no encontrada"
+        )
+    
+    mensajes = db.query(Mensaje).filter(
+        Mensaje.id_conversacion == conversation_id
+    ).order_by(Mensaje.timestamp).all()
+    
+    return {
+        "id": conversacion.id,
+        "titulo": conversacion.titulo,
+        "fecha_inicio": conversacion.fecha_inicio,
+        "fecha_ultima_actividad": conversacion.fecha_ultima_actividad,
+        "activa": conversacion.activa,
+        "usuario": {
+            "id": conversacion.usuario.id,
+            "username": conversacion.usuario.username,
+            "email": conversacion.usuario.email
+        },
+        "mensajes": [
+            {
+                "id": mensaje.id,
+                "rol": mensaje.rol,
+                "contenido": mensaje.contenido,
+                "consulta_sql": mensaje.consulta_sql,
+                "timestamp": mensaje.timestamp
+            }
+            for mensaje in mensajes
+        ]
+    }
+
+# Admin - Excluded Terms Management  
+@app.get("/admin/excluded-terms")
+async def listar_todos_terminos_excluidos(
+    user_id: Optional[int] = None,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Listar términos excluidos de todos los usuarios (solo admin)"""
+    query = db.query(TerminoExcluido).join(Usuario).filter(TerminoExcluido.activo == True)
+    
+    if user_id:
+        query = query.filter(TerminoExcluido.id_usuario == user_id)
+    
+    terminos = query.all()
+    
+    result = []
+    for termino in terminos:
+        result.append({
+            "id": termino.id,
+            "termino": termino.termino,
+            "fecha_creacion": termino.fecha_creacion,
+            "usuario": {
+                "id": termino.usuario.id,
+                "username": termino.usuario.username,
+                "email": termino.usuario.email
+            }
+        })
+    
+    return result
+
+@app.delete("/admin/excluded-terms/{term_id}", response_model=SuccessResponse)
+async def eliminar_termino_excluido_admin(
+    term_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Eliminar término excluido como admin"""
+    termino = db.query(TerminoExcluido).filter(TerminoExcluido.id == term_id).first()
+    
+    if not termino:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Término no encontrado"
+        )
+    
+    termino.activo = False
+    db.commit()
+    return SuccessResponse(message="Término eliminado exitosamente")
 
 @app.get("/admin/prompts", response_model=List[ConfiguracionPromptResponse])
 async def listar_configuraciones_prompt(
