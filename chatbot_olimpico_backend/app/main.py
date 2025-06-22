@@ -514,6 +514,85 @@ async def obtener_conversacion_admin(
         ]
     }
 
+@app.patch("/admin/conversations/{conversation_id}/deactivate", response_model=SuccessResponse)
+async def desactivar_conversacion_admin(
+    conversation_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Desactivar conversación (solo admin)"""
+    from .models import Conversacion
+    
+    conversacion = db.query(Conversacion).filter(
+        Conversacion.id == conversation_id
+    ).first()
+    
+    if not conversacion:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversación no encontrada"
+        )
+    
+    try:
+        # Soft delete: marcar como inactiva
+        conversacion.activa = False
+        db.commit()
+        
+        return SuccessResponse(
+            message=f"Conversación '{conversacion.titulo or conversation_id}' desactivada exitosamente"
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al desactivar conversación: {str(e)}"
+        )
+
+@app.delete("/admin/conversations/{conversation_id}", response_model=SuccessResponse)
+async def eliminar_conversacion_admin(
+    conversation_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Eliminar conversación y todos sus mensajes permanentemente (solo admin)"""
+    from .models import Conversacion, Mensaje
+    
+    conversacion = db.query(Conversacion).filter(
+        Conversacion.id == conversation_id
+    ).first()
+    
+    if not conversacion:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversación no encontrada"
+        )
+    
+    try:
+        # Obtener estadísticas antes de eliminar para el mensaje de respuesta
+        mensajes_count = db.query(Mensaje).filter(
+            Mensaje.id_conversacion == conversation_id
+        ).count()
+        
+        titulo = conversacion.titulo or f"Conversación {conversation_id}"
+        
+        # Hard delete: eliminar permanentemente conversación y todos sus mensajes
+        # Gracias a cascade="all, delete-orphan" en el modelo Conversacion,
+        # esto eliminará automáticamente todos los mensajes asociados
+        db.delete(conversacion)
+        db.commit()
+        
+        return SuccessResponse(
+            message=f"Conversación '{titulo}' eliminada permanentemente junto con {mensajes_count} mensajes"
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al eliminar conversación: {str(e)}"
+        )
+
 # Admin - Excluded Terms Management  
 @app.get("/admin/excluded-terms")
 async def listar_todos_terminos_excluidos(
