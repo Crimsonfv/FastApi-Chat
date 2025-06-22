@@ -569,6 +569,8 @@ async def listar_configuraciones_prompt(
     db: Session = Depends(get_db)
 ):
     """Listar configuraciones de prompt (solo admin)"""
+    # Mantener filtro activo=True para compatibilidad con configuraciones
+    # que pudieron haberse desactivado antes del cambio a hard delete
     configs = db.query(ConfiguracionPrompt).filter(
         ConfiguracionPrompt.activo == True
     ).all()
@@ -620,6 +622,42 @@ async def actualizar_configuracion_prompt(
     db.commit()
     db.refresh(db_config)
     return ConfiguracionPromptResponse.model_validate(db_config)
+
+@app.delete("/admin/prompts/{config_id}", response_model=SuccessResponse)
+async def eliminar_configuracion_prompt(
+    config_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Eliminar configuración de prompt permanentemente (solo admin)"""
+    db_config = db.query(ConfiguracionPrompt).filter(
+        ConfiguracionPrompt.id == config_id
+    ).first()
+    
+    if not db_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Configuración de prompt no encontrada"
+        )
+    
+    try:
+        # Obtener información para el mensaje de respuesta
+        contexto = db_config.contexto
+        
+        # Hard delete: eliminar permanentemente de la base de datos
+        db.delete(db_config)
+        db.commit()
+        
+        return SuccessResponse(
+            message=f"Configuración de prompt '{contexto}' eliminada permanentemente"
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al eliminar configuración de prompt: {str(e)}"
+        )
 
 # ==================== ENDPOINTS DE DETALLES (Criterio G) ====================
 
