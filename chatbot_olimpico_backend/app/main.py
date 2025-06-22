@@ -184,9 +184,9 @@ async def eliminar_conversacion_endpoint(
     current_user: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Eliminar conversación"""
+    """Eliminar conversación y todos sus mensajes permanentemente"""
     eliminar_conversacion(db, current_user, conversacion_id)
-    return SuccessResponse(message="Conversación eliminada exitosamente")
+    return SuccessResponse(message="Conversación y todos sus mensajes eliminados permanentemente")
 
 @app.put("/conversations/{conversacion_id}/title", response_model=ConversacionResponse)
 async def actualizar_titulo(
@@ -371,6 +371,7 @@ async def actualizar_usuario_admin(
 @app.delete("/admin/users/{user_id}", response_model=SuccessResponse)
 async def eliminar_usuario_admin(
     user_id: int,
+    hard_delete: bool = False,
     current_admin: Usuario = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
@@ -388,10 +389,48 @@ async def eliminar_usuario_admin(
             detail="Usuario no encontrado"
         )
     
-    # Soft delete: desactivar usuario en lugar de eliminarlo
-    usuario.activo = False
-    db.commit()
-    return SuccessResponse(message="Usuario eliminado exitosamente")
+    try:
+        if hard_delete:
+            # Hard delete: eliminar permanentemente usuario y todas sus relaciones
+            # Gracias a cascade="all, delete-orphan" en los modelos, esto eliminará:
+            # - Todas las conversaciones del usuario
+            # - Todos los mensajes de esas conversaciones
+            # - Todos los términos excluidos del usuario
+            
+            # Primero obtener estadísticas antes de eliminar para el mensaje de respuesta
+            from .models import Conversacion, Mensaje, TerminoExcluido
+            
+            conversaciones_count = db.query(Conversacion).filter(
+                Conversacion.id_usuario == user_id
+            ).count()
+            
+            mensajes_count = db.query(Mensaje).join(Conversacion).filter(
+                Conversacion.id_usuario == user_id
+            ).count()
+            
+            terminos_count = db.query(TerminoExcluido).filter(
+                TerminoExcluido.id_usuario == user_id
+            ).count()
+            
+            # Eliminar usuario (cascade se encarga del resto)
+            db.delete(usuario)
+            db.commit()
+            
+            return SuccessResponse(
+                message=f"Usuario '{usuario.username}' eliminado permanentemente junto con {conversaciones_count} conversaciones, {mensajes_count} mensajes y {terminos_count} términos excluidos"
+            )
+        else:
+            # Soft delete: desactivar usuario (mantiene datos para auditoría)
+            usuario.activo = False
+            db.commit()
+            return SuccessResponse(message=f"Usuario '{usuario.username}' desactivado (soft delete)")
+            
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al eliminar usuario: {str(e)}"
+        )
 
 # Admin - Conversation Management
 @app.get("/admin/conversations")

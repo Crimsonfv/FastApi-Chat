@@ -35,6 +35,8 @@ def crear_conversacion(db: Session, usuario: Usuario, conversacion: Conversacion
 def obtener_conversaciones_usuario(db: Session, usuario: Usuario, skip: int = 0, limit: int = 100) -> List[ConversacionResponse]:
     """
     Obtener todas las conversaciones del usuario (Criterio B)
+    Nota: Mantenemos el filtro activa=True para compatibilidad con conversaciones
+    que pudieron haberse marcado como inactivas antes del cambio a hard delete
     """
     conversaciones = db.query(Conversacion).filter(
         Conversacion.id_usuario == usuario.id,
@@ -76,7 +78,7 @@ def obtener_conversacion_con_mensajes(db: Session, usuario: Usuario, conversacio
 
 def eliminar_conversacion(db: Session, usuario: Usuario, conversacion_id: int) -> bool:
     """
-    Eliminar conversación (soft delete) (Criterio B)
+    Eliminar conversación y todos sus mensajes permanentemente (hard delete) (Criterio B)
     """
     conversacion = db.query(Conversacion).filter(
         Conversacion.id == conversacion_id,
@@ -89,11 +91,31 @@ def eliminar_conversacion(db: Session, usuario: Usuario, conversacion_id: int) -
             detail="Conversación no encontrada"
         )
     
-    # Soft delete - marcar como inactiva
-    conversacion.activa = False
-    db.commit()
-    
-    return True
+    try:
+        # Hard delete: eliminar permanentemente la conversación y todos sus mensajes
+        # Gracias a cascade="all, delete-orphan" en el modelo Conversacion,
+        # esto eliminará automáticamente todos los mensajes asociados
+        
+        # Obtener estadísticas antes de eliminar para logging
+        mensajes_count = db.query(Mensaje).filter(
+            Mensaje.id_conversacion == conversacion_id
+        ).count()
+        
+        # Eliminar conversación (cascade eliminará automáticamente los mensajes)
+        db.delete(conversacion)
+        db.commit()
+        
+        # Log para auditoría
+        print(f"Conversación {conversacion_id} eliminada permanentemente junto con {mensajes_count} mensajes")
+        
+        return True
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al eliminar conversación: {str(e)}"
+        )
 
 def actualizar_titulo_conversacion(db: Session, usuario: Usuario, conversacion_id: int, nuevo_titulo: str) -> ConversacionResponse:
     """
