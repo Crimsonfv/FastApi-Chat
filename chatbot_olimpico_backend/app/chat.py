@@ -4,6 +4,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import logging
 import json
+from decimal import Decimal
+import datetime
+import uuid
 
 from .config import settings
 from .models import Usuario, MedallaOlimpica, TerminoExcluido, ConfiguracionPrompt
@@ -28,6 +31,20 @@ def log_anthropic_config():
 # Llamar al diagnóstico al importar el módulo
 log_anthropic_config()
 
+def safe_json_serializer(obj):
+    """
+    Safe JSON serializer for complex data types
+    """
+    if isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    elif isinstance(obj, uuid.UUID):
+        return str(obj)
+    elif hasattr(obj, 'isoformat'):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 # Cliente de Anthropic con logs
 try:
     print("🔄 Intentando crear cliente de Anthropic...")
@@ -39,10 +56,10 @@ except Exception as e:
 
 # Estructura de la tabla principal (basada en tu ExtraerCSV_Olimpiadas.py)
 ESTRUCTURA_TABLA_OLIMPICA = """
-TABLA medallas_olimpicas
+TABLA medallas_olimpicas - Contiene datos de MEDALLISTAS olímpicos de verano 1976-2008
 id              SERIAL PRIMARY KEY
-city            VARCHAR(100)     - Ciudad olímpica
-year            INTEGER          - Año de las olimpiadas  
+city            VARCHAR(100)     - Ciudad donde se realizaron las olimpiadas (ej: Montreal, Moscow, Los Angeles, Seoul, Barcelona, Atlanta, Sydney, Athens, Beijing)
+year            INTEGER          - Año de las olimpiadas (1976, 1980, 1984, 1988, 1992, 1996, 2000, 2004, 2008)
 sport           VARCHAR(100)     - Deporte
 discipline      VARCHAR(100)     - Disciplina específica
 event           VARCHAR(200)     - Evento específico
@@ -56,6 +73,12 @@ country         VARCHAR(100)     - Nombre del país
 event_gender    VARCHAR(10)      - Género del evento
 medal           VARCHAR(20)      - Tipo de medalla (Gold, Silver, Bronze)
 created_at      TIMESTAMP        - Fecha de creación del registro
+
+INFORMACIÓN IMPORTANTE:
+- Cada fila representa un medallista (oro, plata o bronce)
+- El campo 'city' contiene las ciudades anfitrionas de los Juegos Olímpicos
+- El periodo de datos es 1976-2008 (Juegos Olímpicos de Verano únicamente)
+- Para consultas sobre ciudades repetidas, usar GROUP BY city con COUNT(DISTINCT year)
 """
 
 def obtener_prompt_contexto(db: Session, contexto: str = "deportivo") -> str:
@@ -71,9 +94,14 @@ def obtener_prompt_contexto(db: Session, contexto: str = "deportivo") -> str:
         return config.prompt_sistema
     
     # Prompt por defecto si no hay configuración
-    return """Eres un asistente especializado en análisis de datos olímpicos. 
-    Proporciona respuestas precisas y profesionales sobre medallas, atletas, 
-    países y estadísticas olímpicas."""
+    return """Eres un asistente especializado en análisis de datos olímpicos de verano (1976-2008). 
+    Tienes acceso a información completa sobre medallistas, ciudades anfitrionas, países, deportes y estadísticas olímpicas.
+    Proporciona respuestas precisas y profesionales. Puedes responder sobre:
+    - Ciudades que han organizado múltiples Juegos Olímpicos
+    - Medallistas y sus logros
+    - Estadísticas por países, deportes y años
+    - Análisis comparativos entre olimpiadas
+    La base de datos contiene todas las medallas otorgadas en los Juegos Olímpicos de Verano desde Montreal 1976 hasta Beijing 2008."""
 
 def obtener_terminos_excluidos(db: Session, usuario: Usuario) -> List[str]:
     """
@@ -264,6 +292,16 @@ Genera una consulta SQL para PostgreSQL que responda la pregunta del usuario. Si
     - O usa subconsultas para ordenamiento complejo
     - O omite ORDER BY en STRING_AGG si no es esencial
 
+ESPECIAL - CONSULTAS SOBRE CIUDADES OLÍMPICAS:
+17. Para preguntas sobre ciudades que se repiten o ciudades anfitrionas múltiples:
+    - Usa la columna 'city' que contiene las ciudades donde se realizaron las olimpiadas
+    - Para encontrar ciudades repetidas: GROUP BY city HAVING COUNT(DISTINCT year) > 1
+    - Para listar todas las ediciones: incluye year y city en los resultados
+    - Ejemplos de consultas típicas de ciudades:
+      * "ciudades que se repiten" → SELECT city, COUNT(DISTINCT year) as veces, STRING_AGG(DISTINCT year::text, ', ' ORDER BY year::text) as años FROM medallas_olimpicas GROUP BY city HAVING COUNT(DISTINCT year) > 1
+      * "ciudades anfitrionas" → SELECT DISTINCT city, year FROM medallas_olimpicas ORDER BY year
+      * "cuántas veces una ciudad específica" → WHERE city ILIKE '%ciudad%' GROUP BY city, year
+
 Responde solo con la consulta SQL, sin agregar nada más."""
 
     try:
@@ -327,10 +365,19 @@ def ejecutar_sql(db: Session, sql_query: str) -> List[Dict]:
             row_dict = {}
             for i, column in enumerate(columns):
                 value = row[i]
-                # Convertir tipos especiales para JSON
-                if hasattr(value, 'isoformat'):  # datetime
-                    value = value.isoformat()
-                row_dict[column] = value
+                # Convertir tipos especiales para JSON serialization
+                if value is None:
+                    row_dict[column] = None
+                elif isinstance(value, Decimal):
+                    # Fix: Convert Decimal to float for JSON serialization
+                    row_dict[column] = float(value)
+                elif isinstance(value, (datetime.datetime, datetime.date)):
+                    # Convert datetime objects to ISO format string
+                    row_dict[column] = value.isoformat()
+                elif hasattr(value, 'isoformat'):  # Other datetime-like objects
+                    row_dict[column] = value.isoformat()
+                else:
+                    row_dict[column] = value
             resultados.append(row_dict)
             
         logger.info(f"SQL ejecutado exitosamente. Resultados: {len(resultados)} filas")
@@ -389,7 +436,7 @@ Dada la siguiente pregunta:
 "{pregunta}"
 
 Y los siguientes resultados de la consulta SQL:
-{json.dumps(resultados_sql, indent=2, ensure_ascii=False)}
+{json.dumps(resultados_sql, indent=2, ensure_ascii=False, default=safe_json_serializer)}
 
 Genera una respuesta en lenguaje natural, entendible para un usuario interesado en datos olímpicos con las siguientes reglas:
 
