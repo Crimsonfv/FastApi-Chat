@@ -601,7 +601,8 @@ async def listar_todos_terminos_excluidos(
     db: Session = Depends(get_db)
 ):
     """Listar términos excluidos de todos los usuarios (solo admin)"""
-    query = db.query(TerminoExcluido).join(Usuario).filter(TerminoExcluido.activo == True)
+    # Cambiar para mostrar tanto activos como inactivos para admin
+    query = db.query(TerminoExcluido).join(Usuario)
     
     if user_id:
         query = query.filter(TerminoExcluido.id_usuario == user_id)
@@ -613,6 +614,7 @@ async def listar_todos_terminos_excluidos(
         result.append({
             "id": termino.id,
             "termino": termino.termino,
+            "activo": termino.activo,  # Añadir campo activo
             "fecha_creacion": termino.fecha_creacion,
             "usuario": {
                 "id": termino.usuario.id,
@@ -623,13 +625,13 @@ async def listar_todos_terminos_excluidos(
     
     return result
 
-@app.delete("/admin/excluded-terms/{term_id}", response_model=SuccessResponse)
-async def eliminar_termino_excluido_admin(
+@app.patch("/admin/excluded-terms/{term_id}/deactivate", response_model=SuccessResponse)
+async def desactivar_termino_excluido_admin(
     term_id: int,
     current_admin: Usuario = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
-    """Eliminar término excluido como admin"""
+    """Desactivar término excluido (solo admin)"""
     termino = db.query(TerminoExcluido).filter(TerminoExcluido.id == term_id).first()
     
     if not termino:
@@ -638,9 +640,56 @@ async def eliminar_termino_excluido_admin(
             detail="Término no encontrado"
         )
     
-    termino.activo = False
-    db.commit()
-    return SuccessResponse(message="Término eliminado exitosamente")
+    try:
+        # Soft delete: marcar como inactivo
+        termino.activo = False
+        db.commit()
+        
+        return SuccessResponse(
+            message=f"Término '{termino.termino}' desactivado exitosamente"
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al desactivar término: {str(e)}"
+        )
+
+@app.delete("/admin/excluded-terms/{term_id}", response_model=SuccessResponse)
+async def eliminar_termino_excluido_admin(
+    term_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Eliminar término excluido permanentemente (solo admin)"""
+    termino = db.query(TerminoExcluido).filter(TerminoExcluido.id == term_id).first()
+    
+    if not termino:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Término no encontrado"
+        )
+    
+    try:
+        # Obtener información para el mensaje de respuesta
+        termino_texto = termino.termino
+        usuario_username = termino.usuario.username
+        
+        # Hard delete: eliminar permanentemente de la base de datos
+        db.delete(termino)
+        db.commit()
+        
+        return SuccessResponse(
+            message=f"Término '{termino_texto}' del usuario '{usuario_username}' eliminado permanentemente"
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al eliminar término: {str(e)}"
+        )
 
 @app.get("/admin/prompts", response_model=List[ConfiguracionPromptResponse])
 async def listar_configuraciones_prompt(
