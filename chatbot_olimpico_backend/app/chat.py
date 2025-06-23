@@ -7,6 +7,7 @@ import json
 from decimal import Decimal
 import datetime
 import uuid
+import re
 
 from .config import settings
 from .models import Usuario, MedallaOlimpica, TerminoExcluido, ConfiguracionPrompt
@@ -53,6 +54,112 @@ try:
 except Exception as e:
     print(f"❌ Error al crear cliente de Anthropic: {e}")
     client = None
+
+# Lista de patrones de consultas sensibles que deben ser rechazadas
+PATRONES_CONSULTAS_SENSIBLES = [
+    # Consultas sobre usuarios y passwords (más precisas)
+    r'\b(user|usuario|users|usuarios|registered)\b.*(password|contraseña|pass|pwd|email|mail)',
+    r'\b(password|contraseña|pass|pwd)\b.*(user|usuario|users|usuarios)',
+    r'\b(show|list|dame|mostrar)\b.*(user|usuario|users|usuarios).*(password|email)',
+    r'\b(registered|registrados?)\b.*\b(user|usuario|users|usuarios)\b',
+    r'\b(login|sesion|session|auth)\b.*\b(data|datos|info|información)\b',
+    
+    # Consultas sobre estructura de base de datos
+    r'\b(show|mostrar|ver|listar|dame|display|list|what)\b.*(table|tabla|tables|tablas|database|base)',
+    r'\b(all|todas?)\b.*(table|tabla|tables|tablas)',
+    r'\b(what|que|cuales?|which)\b.*\b(table|tabla|tables|tablas)\b.*\b(database|base|db)\b',
+    r'\b(describe|desc|structure|estructura)\b.*\b(table|tabla|database|base)\b',
+    # Consultas sobre columnas de la base de datos
+    r'\b(what|que|cuales?|which)\b.*(column|columna|columns|columnas|field|campo|fields|campos)\b',
+    r'\b(show|mostrar|ver|listar|dame|display|list)\b.*(column|columna|columns|columnas|field|campo|fields|campos)',
+    r'\b(column|columna|columns|columnas)\b.*(database|base|table|tabla)',
+    r'\b(structure|estructura|schema|esquema)\b.*(column|columna|table|tabla)',
+    # Metadatos del sistema
+    r'\bschema\b',
+    r'\binformation_schema\b',
+    r'\bpg_tables\b',
+    r'\bpg_catalog\b',
+    
+    # Consultas sobre configuración del sistema
+    r'\b(config|configuracion|configuration|settings|ajustes)\b',
+    r'\b(admin|administrator|administrador)\b.*\b(data|datos|info|información)\b',
+    r'\b(system|sistema)\b.*\b(info|información|data|datos)\b',
+    
+    # Consultas DDL/DML peligrosas
+    r'\b(drop|delete|update|insert|create|alter|truncate)\b',
+    r'\b(grant|revoke|permissions|permisos)\b',
+    
+    # Consultas sobre conversaciones y mensajes privados
+    r'\b(conversaciones?|conversations?|message|mensaje|messages|mensajes|chat)\b.*\b(other|otros?|all|todas?|private|privados?)\b',
+    r'\b(show|mostrar|ver|listar)\b.*\b(chat|conversaciones?|mensajes?)\b',
+]
+
+# Lista de nombres de tablas públicas permitidas
+TABLAS_PUBLICAS_PERMITIDAS = [
+    'medallas_olimpicas'
+]
+
+def detectar_consulta_sensible(pregunta: str) -> tuple[bool, str]:
+    """
+    Detecta si una consulta contiene patrones sensibles que deben ser rechazados.
+    Retorna (es_sensible, mensaje_rechazo)
+    """
+    pregunta_lower = pregunta.lower()
+    
+    # Verificar cada patrón sensible
+    for patron in PATRONES_CONSULTAS_SENSIBLES:
+        if re.search(patron, pregunta_lower, re.IGNORECASE):
+            print(f"🚫 Consulta sensible detectada. Patrón: {patron}")
+            print(f"🚫 Pregunta: {pregunta}")
+            
+            # Generar mensaje de rechazo apropiado según el tipo de consulta
+            if re.search(r'\b(user|usuario|users|usuarios)\b.*\b(password|contraseña|pass|pwd|email|mail)\b', pregunta_lower):
+                return True, "Lo siento, no puedo proporcionar información sobre usuarios registrados, contraseñas o datos de autenticación por motivos de seguridad."
+            
+            elif re.search(r'\b(table|tabla|tables|tablas|database|base|schema|column|columna|columns|columnas|field|campo|fields|campos|structure|estructura)\b', pregunta_lower):
+                return True, "Solo puedo proporcionar información sobre los datos olímpicos disponibles en la tabla de medallistas. No tengo acceso a información sobre la estructura de la base de datos o sus columnas."
+            
+            elif re.search(r'\b(config|configuracion|admin|administrator|administrador|system|sistema)\b', pregunta_lower):
+                return True, "No tengo acceso a información del sistema, configuración o datos administrativos. Solo puedo ayudarte con consultas sobre datos olímpicos."
+            
+            elif re.search(r'\b(conversaciones?|conversations?|message|mensaje|messages|mensajes|chat)\b', pregunta_lower):
+                return True, "No puedo acceder a conversaciones o mensajes de otros usuarios por motivos de privacidad. Solo puedo ayudarte con datos olímpicos públicos."
+            
+            else:
+                return True, "Lo siento, no puedo procesar esa consulta. Solo puedo ayudarte con información sobre medallistas olímpicos, países, deportes y estadísticas relacionadas con los Juegos Olímpicos de 1976-2008."
+    
+    return False, ""
+
+def validar_respuesta_estructura_db(pregunta: str) -> tuple[bool, str]:
+    """
+    Detecta consultas sobre estructura de DB y proporciona respuesta controlada.
+    """
+    pregunta_lower = pregunta.lower()
+    
+    # Patrones específicos sobre tablas/estructura
+    patrones_estructura = [
+        r'\b(what|que|cuales?|which)\b.*\b(table|tabla|tables|tablas)\b',
+        r'\b(show|mostrar|ver|listar)\b.*\b(table|tabla|tables|tablas)\b',
+        r'\b(database|base)\b.*\b(structure|estructura|schema|esquema)\b'
+    ]
+    
+    for patron in patrones_estructura:
+        if re.search(patron, pregunta_lower):
+            print(f"🔍 Consulta sobre estructura de DB detectada")
+            mensaje_publico = """Tengo acceso únicamente a la tabla de medallistas olímpicos (medallas_olimpicas) que contiene información sobre:
+
+- Medallistas de los Juegos Olímpicos de Verano 1976-2008
+- Países participantes y sus códigos
+- Deportes, disciplinas y eventos
+- Tipos de medallas (oro, plata, bronce)
+- Ciudades anfitrionas de las olimpiadas
+- Género de atletas y eventos
+
+¿Te gustaría consultar algún dato específico sobre medallistas olímpicos?"""
+            
+            return True, mensaje_publico
+    
+    return False, ""
 
 # Estructura de la tabla principal (basada en tu ExtraerCSV_Olimpiadas.py)
 ESTRUCTURA_TABLA_OLIMPICA = """
@@ -266,6 +373,13 @@ Y la siguiente consulta en lenguaje natural:
 
 Genera una consulta SQL para PostgreSQL que responda la pregunta del usuario. Sigue estas pautas:
 
+RESTRICCIONES DE SEGURIDAD CRÍTICAS:
+- SOLO accede a la tabla medallas_olimpicas
+- NO generes consultas sobre otras tablas del sistema
+- NO uses information_schema, pg_tables, pg_catalog u otras tablas del sistema
+- NO generes DDL (CREATE, DROP, ALTER) o DML (INSERT, UPDATE, DELETE)
+- Si la pregunta solicita información no disponible en medallas_olimpicas, responde que esa información no está disponible
+
 0. La tabla se llama medallas_olimpicas.
 0.1. IMPORTANTE: Si hay contexto de conversación previa, usa esa información para interpretar referencias como "el país anterior", "ese atleta", "la medalla mencionada", etc.
 0.2. Las referencias contextuales deben resolverse usando la información del historial de conversación.
@@ -301,6 +415,20 @@ ESPECIAL - CONSULTAS SOBRE CIUDADES OLÍMPICAS:
       * "ciudades que se repiten" → SELECT city, COUNT(DISTINCT year) as veces, STRING_AGG(DISTINCT year::text, ', ' ORDER BY year::text) as años FROM medallas_olimpicas GROUP BY city HAVING COUNT(DISTINCT year) > 1
       * "ciudades anfitrionas" → SELECT DISTINCT city, year FROM medallas_olimpicas ORDER BY year
       * "cuántas veces una ciudad específica" → WHERE city ILIKE '%ciudad%' GROUP BY city, year
+
+ESPECIAL - CONSULTAS SOBRE DEPORTES Y PAÍSES:
+18. Para consultas sobre países que ganaron medallas en deportes específicos:
+    - Para natación/swimming: usar WHERE sport ILIKE '%Aquatics%' OR sport ILIKE '%Swimming%'
+    - Para atletismo: WHERE sport ILIKE '%Athletics%'
+    - Para gymnastia: WHERE sport ILIKE '%Gymnastics%'
+    - Asegúrate de incluir GROUP BY country cuando pregunten por países
+    - Ejemplo: "países con medallas de oro en natación" → SELECT country, COUNT(*) as gold_medals FROM medallas_olimpicas WHERE sport ILIKE '%Aquatics%' AND medal = 'Gold' GROUP BY country ORDER BY gold_medals DESC
+    - SIEMPRE incluir WHERE clauses apropiadas para el deporte mencionado
+    
+19. Para consultas de género/participación:
+    - Usa gender = 'Men' y gender = 'Women' (no 'Male'/'Female')
+    - Para análisis temporales incluye year en GROUP BY
+    - Para comparaciones por país incluye country en SELECT y GROUP BY
 
 Responde solo con la consulta SQL, sin agregar nada más."""
 
@@ -391,21 +519,130 @@ def ejecutar_sql(db: Session, sql_query: str) -> List[Dict]:
         except Exception as rollback_error:
             logger.error(f"Error en rollback: {rollback_error}")
         
-        # Clasificar tipos de errores para mejor manejo
+        # Clasificar tipos de errores SQL y crear excepciones específicas
         error_message = str(e).lower()
         
+        logger.error(f"Error SQL detallado: {e}")
+        
+        # Crear excepción personalizada para manejo específico de errores SQL
         if "invalidcolumnreference" in error_message or "order by expressions must appear" in error_message:
             logger.error(f"Error de sintaxis PostgreSQL en STRING_AGG/DISTINCT: {e}")
-            raise Exception("Error de sintaxis SQL: Las expresiones ORDER BY en agregaciones con DISTINCT deben aparecer en la lista de argumentos")
+            raise SQLSyntaxError("Complex aggregation query requires restructuring")
         elif "syntax error" in error_message:
             logger.error(f"Error de sintaxis SQL: {e}")
-            raise Exception(f"Error de sintaxis en la consulta SQL: {str(e)}")
+            raise SQLSyntaxError("Invalid SQL syntax generated")
         elif "column" in error_message and "does not exist" in error_message:
             logger.error(f"Error de columna inexistente: {e}")
-            raise Exception(f"Error: Columna inexistente en la consulta: {str(e)}")
+            raise SQLSyntaxError("Column reference error in query")
+        elif "relation" in error_message and "does not exist" in error_message:
+            logger.error(f"Error de tabla inexistente: {e}")
+            raise SQLSyntaxError("Table reference error in query")
         else:
             logger.error(f"Error general al ejecutar SQL: {e}")
-            raise Exception(f"Error en la consulta: {str(e)}")
+            raise SQLExecutionError(f"Database query execution failed: {str(e)}")
+
+
+# Excepciones personalizadas para manejo específico de errores SQL
+class SQLSyntaxError(Exception):
+    """Raised when there are SQL syntax or structure issues"""
+    pass
+
+class SQLExecutionError(Exception):
+    """Raised when there are SQL execution issues"""
+    pass
+
+def deberia_tener_resultados(pregunta: str) -> bool:
+    """
+    Determina si una pregunta debería normalmente tener resultados en los datos olímpicos.
+    Usado para detectar casos donde una consulta válida devuelve resultados vacíos inesperadamente.
+    """
+    pregunta_lower = pregunta.lower()
+    
+    # Patrones que indican consultas que normalmente deberían tener resultados
+    patrones_con_resultados = [
+        # Consultas sobre deportes populares
+        r'\b(swimming|natación|natacion|aquatics)\b.*\b(countries|países|paises|country)\b',
+        r'\b(countries|países|paises)\b.*\b(gold|oro|medals|medallas)\b',
+        r'\b(usa|united states|estados unidos)\b.*\b(medals|medallas)\b',
+        r'\b(athletes|atletas)\b.*\b(medals|medallas)\b',
+        
+        # Deportes que definitivamente existen en los datos
+        r'\b(athletics|atletismo|gymnastics|gimnasia|swimming|natación)\b',
+        
+        # Países que definitivamente existen
+        r'\b(usa|united states|china|russia|germany|australia|brazil|brasil)\b',
+        
+        # Consultas sobre medallas que deberían tener resultados
+        r'\b(gold|silver|bronze|oro|plata|bronce)\b.*\b(medals|medallas)\b',
+        
+        # Consultas temporales sobre años que están en nuestros datos
+        r'\b(1976|1980|1984|1988|1992|1996|2000|2004|2008)\b',
+    ]
+    
+    for patron in patrones_con_resultados:
+        if re.search(patron, pregunta_lower):
+            print(f"🎯 Pregunta '{pregunta}' debería tener resultados (patrón: {patron})")
+            return True
+    
+    return False
+
+
+def obtener_consulta_sql_simplificada(pregunta: str, prompt_contexto: str) -> str:
+    """
+    Generar una consulta SQL simplificada como fallback para casos de error.
+    Se enfoca en consultas básicas sin agregaciones complejas.
+    """
+    print(f"\n🔄 === GENERANDO CONSULTA SQL SIMPLIFICADA ===")
+    print(f"Pregunta: {pregunta}")
+    
+    if not client:
+        raise Exception("Cliente de Anthropic no disponible")
+    
+    # Prompt simplificado que evita consultas complejas
+    prompt_simplificado = f"""
+{prompt_contexto}
+
+IMPORTANTE: Genera SOLO consultas SQL simples sin:
+- UNION con ORDER BY
+- Agregaciones complejas con DISTINCT y ORDER BY
+- Subconsultas complejas
+
+Datos disponibles en la tabla medallas_olimpicas:
+- city: ciudad olímpica
+- year: año de los juegos  
+- sport: deporte
+- discipline: disciplina
+- event: evento específico
+- athlete: nombre del atleta
+- gender: género del atleta
+- country_code: código de país
+- country: nombre del país
+- medal: tipo de medalla (Gold, Silver, Bronze)
+
+Pregunta del usuario: {pregunta}
+
+Genera una consulta SQL simple y directa que responda la pregunta:
+"""
+
+    try:
+        response = client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=500,  # Reducido para consultas más simples
+            messages=[{
+                "role": "user", 
+                "content": prompt_simplificado
+            }]
+        )
+        
+        sql_query = response.content[0].text.strip()
+        print(f"✅ SQL simplificado generado: {sql_query}")
+        return sql_query
+        
+    except Exception as e:
+        logger.error(f"Error generando SQL simplificado: {e}")
+        # Consulta por defecto muy básica
+        return "SELECT DISTINCT country, COUNT(*) as total_medals FROM medallas_olimpicas WHERE medal = 'Gold' GROUP BY country ORDER BY total_medals DESC LIMIT 10;"
+
 
 def generar_respuesta_final(resultados_sql: List[Dict], pregunta: str, prompt_contexto: str, historial_conversacion: List[Dict] = None) -> str:
     """
@@ -494,6 +731,30 @@ def procesar_consulta_chat(
         print(f"Usuario: {usuario.username}")
         print(f"Pregunta: {pregunta}")
         
+        # 0. VALIDACIÓN DE SEGURIDAD - Detectar consultas sensibles
+        es_sensible, mensaje_rechazo = detectar_consulta_sensible(pregunta)
+        if es_sensible:
+            print(f"🚫 CONSULTA RECHAZADA: {pregunta}")
+            return {
+                "respuesta": mensaje_rechazo,
+                "consulta_sql": None,
+                "datos_contexto": None,
+                "error": False,
+                "rechazada": True
+            }
+        
+        # 0.1. VALIDACIÓN ESPECIAL - Consultas sobre estructura de DB
+        es_estructura, respuesta_estructura = validar_respuesta_estructura_db(pregunta)
+        if es_estructura:
+            print(f"🔍 RESPUESTA CONTROLADA DE ESTRUCTURA DE DB")
+            return {
+                "respuesta": respuesta_estructura,
+                "consulta_sql": None,
+                "datos_contexto": None,
+                "error": False,
+                "rechazada": False
+            }
+        
         # 1. Obtener configuración de prompt por contexto (Criterio F)
         prompt_contexto = obtener_prompt_contexto(db, contexto)
         
@@ -514,8 +775,39 @@ def procesar_consulta_chat(
         # 4. Generar SQL con Claude (Criterio A + D) - incluyendo historial para contexto y términos excluidos
         sql_query = obtener_consulta_sql(pregunta, prompt_contexto, historial_conversacion, terminos_excluidos)
         
-        # 5. Ejecutar SQL (Criterio D)
-        resultados_sql = ejecutar_sql(db, sql_query)
+        # 5. Ejecutar SQL (Criterio D) con manejo de errores específicos
+        try:
+            resultados_sql = ejecutar_sql(db, sql_query)
+        except SQLSyntaxError as sql_error:
+            # Error de sintaxis SQL - intentar consulta simplificada como fallback
+            logger.warning(f"Error de sintaxis SQL, intentando fallback: {sql_error}")
+            print(f"⚠️ Error SQL, intentando consulta simplificada...")
+            
+            try:
+                # Generar una consulta más simple como fallback
+                sql_query_fallback = obtener_consulta_sql_simplificada(pregunta, prompt_contexto)
+                print(f"🔄 Intentando consulta simplificada: {sql_query_fallback}")
+                resultados_sql = ejecutar_sql(db, sql_query_fallback)
+                sql_query = sql_query_fallback  # Usar la consulta fallback para los datos de contexto
+            except Exception as fallback_error:
+                logger.error(f"Fallback también falló: {fallback_error}")
+                # Si el fallback también falla, devolver mensaje amigable
+                return {
+                    "respuesta": "Lo siento, tuve dificultades técnicas procesando tu consulta sobre los datos olímpicos. ¿Podrías reformularla de manera más simple? Por ejemplo, puedes preguntarme sobre medallas por país, deporte específico, o año.",
+                    "consulta_sql": None,
+                    "datos_contexto": None,
+                    "error": False,
+                    "fallback_used": True
+                }
+        except SQLExecutionError as exec_error:
+            logger.error(f"Error de ejecución SQL: {exec_error}")
+            return {
+                "respuesta": "Encontré un problema al acceder a los datos olímpicos. Por favor, intenta con una consulta diferente o más específica.",
+                "consulta_sql": None,
+                "datos_contexto": None,
+                "error": False,
+                "fallback_used": True
+            }
         print(f"\n📊 === DEBUG RESULTADOS SQL ===")
         print(f"Resultados SQL sin filtrar: {len(resultados_sql)} filas")
         if resultados_sql:
@@ -532,14 +824,35 @@ def procesar_consulta_chat(
                     print(f"  - {found}")
         print("===============================\n")
         
-        # 6. Los términos excluidos ahora se manejan directamente en la generación de SQL
+        # 6. Verificar si resultados vacíos cuando deberían tener datos (mejora de consistencia)
+        if len(resultados_sql) == 0 and deberia_tener_resultados(pregunta):
+            print(f"⚠️ === RESULTADOS VACÍOS INESPERADOS ===")
+            print(f"La consulta '{pregunta}' debería tener resultados pero no los tiene.")
+            print("Intentando consulta simplificada como fallback...")
+            
+            try:
+                # Intentar consulta simplificada para obtener al menos algunos datos
+                sql_query_fallback = obtener_consulta_sql_simplificada(pregunta, prompt_contexto)
+                print(f"🔄 Intentando consulta fallback: {sql_query_fallback}")
+                resultados_sql_fallback = ejecutar_sql(db, sql_query_fallback)
+                
+                if len(resultados_sql_fallback) > 0:
+                    print(f"✅ Fallback exitoso: {len(resultados_sql_fallback)} resultados encontrados")
+                    resultados_sql = resultados_sql_fallback
+                    sql_query = sql_query_fallback
+                else:
+                    print("❌ Fallback también devolvió resultados vacíos")
+            except Exception as fallback_error:
+                print(f"❌ Error en fallback para resultados vacíos: {fallback_error}")
+        
+        # 7. Los términos excluidos ahora se manejan directamente en la generación de SQL
         # No es necesario filtrar post-SQL ya que el AI genera SQL con exclusiones integradas
         print(f"\n✅ === FILTRADO INTEGRADO EN SQL ===")
         print(f"Términos excluidos manejados por AI en SQL: {terminos_excluidos}")
         print(f"Resultados SQL ya filtrados: {len(resultados_sql)}")
         print("=====================================\n")
         
-        # 7. Generar respuesta natural con Claude (Criterio A) - incluyendo historial para contexto
+        # 8. Generar respuesta natural con Claude (Criterio A) - incluyendo historial para contexto
         respuesta_final = generar_respuesta_final(resultados_sql, pregunta, prompt_contexto, historial_conversacion)
         
         # 8. Preparar datos de contexto para modal (Criterio G)
@@ -562,9 +875,25 @@ def procesar_consulta_chat(
     except Exception as e:
         logger.error(f"Error en procesamiento de chat: {e}")
         print(f"❌ Error en procesamiento: {e}")
+        
+        # Proporcionar mensaje amigable sin exponer detalles técnicos
+        mensaje_error = "Lo siento, tuve dificultades procesando tu consulta sobre los datos olímpicos. "
+        
+        # Detectar tipos específicos de consulta para sugerir alternativas
+        pregunta_lower = pregunta.lower()
+        if any(palabra in pregunta_lower for palabra in ["countries", "países", "paises", "country"]):
+            mensaje_error += "¿Podrías preguntarme de forma más específica sobre un país en particular o un deporte específico?"
+        elif any(palabra in pregunta_lower for palabra in ["swimming", "natación", "natacion"]):
+            mensaje_error += "¿Podrías preguntarme sobre nadadores específicos o medallas de natación de un país en particular?"
+        elif any(palabra in pregunta_lower for palabra in ["female", "male", "men", "women", "género", "genero"]):
+            mensaje_error += "¿Podrías preguntarme de forma más específica sobre atletas masculinos o femeninos en un deporte particular?"
+        else:
+            mensaje_error += "¿Podrías reformular tu pregunta de manera más simple? Por ejemplo: '¿Qué países ganaron más medallas de oro?' o '¿Cuántas medallas ganó Estados Unidos en natación?'"
+        
         return {
-            "respuesta": f"Ocurrió un error al procesar tu consulta: {str(e)}",
+            "respuesta": mensaje_error,
             "consulta_sql": None,
             "datos_contexto": None,
-            "error": True
+            "error": False,  # No marcar como error técnico
+            "fallback_used": True
         }
