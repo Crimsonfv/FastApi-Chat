@@ -432,6 +432,88 @@ async def eliminar_usuario_admin(
             detail=f"Error al eliminar usuario: {str(e)}"
         )
 
+@app.patch("/admin/users/{user_id}/activate", response_model=UsuarioResponse)
+async def activar_usuario_admin(
+    user_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Reactivar usuario desactivado (solo admin)"""
+    if user_id == current_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No puedes reactivar tu propia cuenta desde este endpoint"
+        )
+    
+    usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado"
+        )
+    
+    if usuario.activo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El usuario ya está activo"
+        )
+    
+    try:
+        # Reactivar usuario
+        usuario.activo = True
+        db.commit()
+        db.refresh(usuario)
+        
+        return UsuarioResponse.model_validate(usuario)
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al reactivar usuario: {str(e)}"
+        )
+
+@app.patch("/admin/users/{user_id}/deactivate", response_model=UsuarioResponse)
+async def desactivar_usuario_admin(
+    user_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Desactivar usuario activo (solo admin)"""
+    if user_id == current_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No puedes desactivar tu propia cuenta"
+        )
+    
+    usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado"
+        )
+    
+    if not usuario.activo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El usuario ya está inactivo"
+        )
+    
+    try:
+        # Desactivar usuario
+        usuario.activo = False
+        db.commit()
+        db.refresh(usuario)
+        
+        return UsuarioResponse.model_validate(usuario)
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al desactivar usuario: {str(e)}"
+        )
+
 # Admin - Conversation Management
 @app.get("/admin/conversations")
 async def listar_todas_conversaciones(
@@ -693,15 +775,18 @@ async def eliminar_termino_excluido_admin(
 
 @app.get("/admin/prompts", response_model=List[ConfiguracionPromptResponse])
 async def listar_configuraciones_prompt(
+    include_inactive: bool = False,
     current_admin: Usuario = Depends(get_current_admin_user),
     db: Session = Depends(get_db)
 ):
     """Listar configuraciones de prompt (solo admin)"""
-    # Mantener filtro activo=True para compatibilidad con configuraciones
-    # que pudieron haberse desactivado antes del cambio a hard delete
-    configs = db.query(ConfiguracionPrompt).filter(
-        ConfiguracionPrompt.activo == True
-    ).all()
+    query = db.query(ConfiguracionPrompt)
+    
+    if not include_inactive:
+        # Solo configuraciones activas por defecto
+        query = query.filter(ConfiguracionPrompt.activo == True)
+    
+    configs = query.all()
     return [ConfiguracionPromptResponse.model_validate(c) for c in configs]
 
 @app.post("/admin/prompts", response_model=ConfiguracionPromptResponse)
@@ -750,6 +835,45 @@ async def actualizar_configuracion_prompt(
     db.commit()
     db.refresh(db_config)
     return ConfiguracionPromptResponse.model_validate(db_config)
+
+@app.patch("/admin/prompts/{config_id}/activate", response_model=ConfiguracionPromptResponse)
+async def activar_configuracion_prompt(
+    config_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Reactivar configuración de prompt desactivada (solo admin)"""
+    db_config = db.query(ConfiguracionPrompt).filter(
+        ConfiguracionPrompt.id == config_id
+    ).first()
+    
+    if not db_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Configuración de prompt no encontrada"
+        )
+    
+    if db_config.activo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La configuración ya está activa"
+        )
+    
+    try:
+        # Reactivar configuración
+        db_config.activo = True
+        db_config.fecha_modificacion = datetime.utcnow()
+        db.commit()
+        db.refresh(db_config)
+        
+        return ConfiguracionPromptResponse.model_validate(db_config)
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al reactivar configuración de prompt: {str(e)}"
+        )
 
 @app.delete("/admin/prompts/{config_id}", response_model=SuccessResponse)
 async def eliminar_configuracion_prompt(
