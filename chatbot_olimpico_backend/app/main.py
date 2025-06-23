@@ -331,6 +331,20 @@ async def actualizar_usuario_admin(
             detail="Usuario no encontrado"
         )
     
+    # Verificar que no sea otro admin (los administradores no pueden editar otros administradores)
+    if usuario.rol == "admin" and usuario.id != current_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para editar otros administradores"
+        )
+    
+    # Verificar que no esté intentando cambiar su propio rol
+    if user_update.rol is not None and usuario.id == current_admin.id and usuario.rol != user_update.rol:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No puedes cambiar tu propio rol"
+        )
+    
     # Actualizar campos permitidos
     if user_update.username is not None:
         # Verificar que el nuevo username no exista
@@ -387,6 +401,13 @@ async def eliminar_usuario_admin(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuario no encontrado"
+        )
+    
+    # Verificar que no sea admin (los administradores no pueden eliminar otros administradores)
+    if usuario.rol == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para eliminar otros administradores"
         )
     
     try:
@@ -497,6 +518,13 @@ async def desactivar_usuario_admin(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El usuario ya está inactivo"
+        )
+    
+    # Verificar que no sea admin (los administradores no pueden desactivar otros administradores)
+    if usuario.rol == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para desactivar otros administradores"
         )
     
     try:
@@ -631,6 +659,47 @@ async def desactivar_conversacion_admin(
             detail=f"Error al desactivar conversación: {str(e)}"
         )
 
+@app.patch("/admin/conversations/{conversation_id}/activate", response_model=SuccessResponse)
+async def activar_conversacion_admin(
+    conversation_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Reactivar conversación (solo admin)"""
+    from .models import Conversacion
+    
+    conversacion = db.query(Conversacion).filter(
+        Conversacion.id == conversation_id
+    ).first()
+    
+    if not conversacion:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversación no encontrada"
+        )
+    
+    if conversacion.activa:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La conversación ya está activa"
+        )
+    
+    try:
+        # Reactivar conversación
+        conversacion.activa = True
+        db.commit()
+        
+        return SuccessResponse(
+            message=f"Conversación '{conversacion.titulo or conversation_id}' reactivada exitosamente"
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al reactivar conversación: {str(e)}"
+        )
+
 @app.delete("/admin/conversations/{conversation_id}", response_model=SuccessResponse)
 async def eliminar_conversacion_admin(
     conversation_id: int,
@@ -736,6 +805,43 @@ async def desactivar_termino_excluido_admin(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al desactivar término: {str(e)}"
+        )
+
+@app.patch("/admin/excluded-terms/{term_id}/activate", response_model=SuccessResponse)
+async def activar_termino_excluido_admin(
+    term_id: int,
+    current_admin: Usuario = Depends(get_current_admin_user),
+    db: Session = Depends(get_db)
+):
+    """Reactivar término excluido (solo admin)"""
+    termino = db.query(TerminoExcluido).filter(TerminoExcluido.id == term_id).first()
+    
+    if not termino:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Término no encontrado"
+        )
+    
+    if termino.activo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El término ya está activo"
+        )
+    
+    try:
+        # Reactivar término: marcar como activo
+        termino.activo = True
+        db.commit()
+        
+        return SuccessResponse(
+            message=f"Término '{termino.termino}' reactivado exitosamente"
+        )
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al reactivar término: {str(e)}"
         )
 
 @app.delete("/admin/excluded-terms/{term_id}", response_model=SuccessResponse)
