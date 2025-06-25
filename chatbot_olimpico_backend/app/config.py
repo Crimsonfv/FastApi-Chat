@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     
     # Configuración de Anthropic - LEE DEL .ENV
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-20250514"
+    anthropic_model: str = "claude-3-5-haiku-20241022"
     
     # Configuración de JWT
     secret_key: str = "tu_clave_secreta_super_segura_cambiar_en_produccion"
