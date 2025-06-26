@@ -226,7 +226,7 @@ def obtener_terminos_excluidos(db: Session, usuario: Usuario) -> List[str]:
     for termino in terminos:
         print(f"  - ID: {termino.id}, Término: '{termino.termino}', Activo: {termino.activo}")
     
-    resultado = [termino.termino.lower() for termino in terminos]
+    resultado = [termino.termino for termino in terminos]
     print(f"Lista final retornada: {resultado}")
     print("==========================================\n")
     
@@ -352,14 +352,55 @@ def obtener_consulta_sql(pregunta: str, prompt_contexto: str, historial_conversa
 TÉRMINOS EXCLUIDOS POR EL USUARIO:
 El usuario ha especificado que NO desea ver resultados que contengan los siguientes términos: {terminos_formateados}
 
-INSTRUCCIONES CRÍTICAS PARA FILTRADO:
+INSTRUCCIONES CRÍTICAS PARA FILTRADO INTELIGENTE:
 - DEBES excluir automáticamente de los resultados SQL cualquier fila que contenga estos términos excluidos
-- Los términos pueden aparecer en cualquier campo (país, atleta, ciudad, deporte, etc.)
-- Maneja variaciones del término (mayúsculas/minúsculas, espacios, plurales, sinónimos comunes)
-- Usa condiciones WHERE con NOT ILIKE para excluir estos términos
-- Para múltiples términos excluidos, usa AND para combinar todas las exclusiones
-- Ejemplo: WHERE country NOT ILIKE '%término1%' AND athlete NOT ILIKE '%término2%' AND sport NOT ILIKE '%término3%'
-- Aplica las exclusiones a TODAS las columnas relevantes donde estos términos podrían aparecer
+- Los términos pueden estar en español, pero la base de datos está en inglés con formato capitalizado
+- DEBES reconocer automáticamente y traducir/adaptar los términos al formato real de la base de datos:
+
+EJEMPLOS CRÍTICOS DE TRADUCCIONES QUE DEBES APLICAR OBLIGATORIAMENTE:
+
+PAÍSES (español → inglés de la BD):
+- "estados unidos" / "eeuu" / "usa" → "United States" (también "USA", "US")
+- "brasil" → "Brazil" 
+- "rusia" → "Russia" (también "Soviet Union" para datos históricos)
+- "china" → "China"
+- "alemania" → "Germany"
+- "reino unido" / "gran bretaña" → "Great Britain"
+
+GÉNEROS (español → inglés de la BD):
+- "masculino" / "hombre" / "hombres" → "Men" (campo gender) y "M" (campo event_gender)
+- "femenino" / "mujer" / "mujeres" → "Women" (campo gender) y "W" (campo event_gender)
+
+DEPORTES (español → inglés de la BD):
+- "natación" → "Aquatics" (también "Swimming")
+- "atletismo" → "Athletics"
+- "gimnasia" → "Gymnastics"
+
+CIUDADES (español → inglés de la BD):
+- "atenas" → "Athens"
+- "pekín" / "pekin" → "Beijing"
+- "moscú" / "moscu" → "Moscow"
+
+⚠️ CRÍTICO: NO uses NUNCA los términos originales en español en el SQL.
+✅ CORRECTO: WHERE gender NOT ILIKE '%Men%'
+❌ INCORRECTO: WHERE gender NOT ILIKE '%masculino%'
+
+⚠️ OBLIGATORIO: SIEMPRE traduce los términos excluidos a los valores EXACTOS de la base de datos antes de usarlos en WHERE.
+
+REGLAS DE APLICACIÓN:
+1. Analiza cada término excluido e identifica si es un país, género, deporte, ciudad o atleta
+2. Traduce automáticamente del español al inglés según corresponda
+3. Aplica las exclusiones a los campos relevantes de la base de datos:
+   * Para países: country, country_code
+   * Para géneros: gender, event_gender  
+   * Para deportes: sport, discipline
+   * Para ciudades: city
+   * Para atletas: athlete, nombre, apellido, nombre_completo
+4. Usa condiciones WHERE con NOT ILIKE para excluir estos términos
+5. Para múltiples términos excluidos, usa AND para combinar todas las exclusiones
+6. Considera variantes y sinónimos del mismo concepto
+7. Ejemplo: Si el usuario excluye "estados unidos", el SQL debe incluir: 
+   WHERE country NOT ILIKE '%United States%' AND country NOT ILIKE '%USA%' AND country NOT ILIKE '%US%'
 
 """
     
@@ -409,12 +450,15 @@ RESTRICCIONES DE SEGURIDAD CRÍTICAS:
 ESPECIAL - CONSULTAS SOBRE CIUDADES OLÍMPICAS:
 17. Para preguntas sobre ciudades que se repiten o ciudades anfitrionas múltiples:
     - Usa la columna 'city' que contiene las ciudades donde se realizaron las olimpiadas
-    - Para encontrar ciudades repetidas: GROUP BY city HAVING COUNT(DISTINCT year) > 1
+    - IMPORTANTE: Los datos cubren 1976-2008 (solo 9 ediciones) donde NINGUNA ciudad se repitió como sede
+    - Para encontrar ciudades repetidas: GROUP BY city HAVING COUNT(DISTINCT year) > 1 (resultará vacío para este período)
     - Para listar todas las ediciones: incluye year y city en los resultados
+    - Si el usuario pregunta por ciudades repetidas, explica que en el período 1976-2008 no hay repeticiones
     - Ejemplos de consultas típicas de ciudades:
       * "ciudades que se repiten" → SELECT city, COUNT(DISTINCT year) as veces, STRING_AGG(DISTINCT year::text, ', ' ORDER BY year::text) as años FROM medallas_olimpicas GROUP BY city HAVING COUNT(DISTINCT year) > 1
       * "ciudades anfitrionas" → SELECT DISTINCT city, year FROM medallas_olimpicas ORDER BY year
       * "cuántas veces una ciudad específica" → WHERE city ILIKE '%ciudad%' GROUP BY city, year
+    - Si no hay resultados para ciudades repetidas, es correcto: cada ciudad fue sede una sola vez en este período
 
 ESPECIAL - CONSULTAS SOBRE DEPORTES Y PAÍSES:
 18. Para consultas sobre países que ganaron medallas en deportes específicos:
@@ -558,6 +602,19 @@ def deberia_tener_resultados(pregunta: str) -> bool:
     """
     pregunta_lower = pregunta.lower()
     
+    # Excepciones: consultas que pueden válidamente devolver resultados vacíos
+    excepciones_sin_resultados = [
+        # Consultas sobre ciudades repetidas (no hay en el período 1976-2008)
+        r'\b(ciudades?|cities?|city)\b.*\b(repetidas?|múltiples?|multiples?|más de una|more than once|repeated?)\b',
+        r'\b(sede|host|hosting)\b.*\b(más de una|multiple|several|varias?)\b.*\b(olimpiadas?|olympics?)\b',
+        r'\b(qué|what|cuáles?|which)\b.*\b(ciudades?|cities?)\b.*\b(han sido sede|hosted?)\b.*\b(más de|multiple|varias?)\b',
+    ]
+    
+    for excepcion in excepciones_sin_resultados:
+        if re.search(excepcion, pregunta_lower):
+            print(f"🚫 Pregunta '{pregunta}' puede válidamente no tener resultados (excepción: {excepcion})")
+            return False
+    
     # Patrones que indican consultas que normalmente deberían tener resultados
     patrones_con_resultados = [
         # Consultas sobre deportes populares
@@ -577,6 +634,9 @@ def deberia_tener_resultados(pregunta: str) -> bool:
         
         # Consultas temporales sobre años que están en nuestros datos
         r'\b(1976|1980|1984|1988|1992|1996|2000|2004|2008)\b',
+        
+        # Consultas sobre ciudades anfitrionas (todas las ciudades)
+        r'\b(ciudades?|cities?)\b.*\b(anfitrionas?|host|hosting|sede)\b',
     ]
     
     for patron in patrones_con_resultados:
