@@ -89,15 +89,40 @@ PATRONES_CONSULTAS_SENSIBLES = [
     r'\b(drop|delete|update|insert|create|alter|truncate)\b',
     r'\b(grant|revoke|permissions|permisos)\b',
     
-    # Consultas sobre conversaciones y mensajes privados
-    r'\b(conversaciones?|conversations?|message|mensaje|messages|mensajes|chat)\b.*\b(other|otros?|all|todas?|private|privados?)\b',
-    r'\b(show|mostrar|ver|listar)\b.*\b(chat|conversaciones?|mensajes?)\b',
+    # Consultas sobre conversaciones y mensajes privados (más específicos)
+    r'\b(conversaciones?|conversations?|message|mensaje|messages|mensajes|chat)\b.*\b(other users?|otros usuarios?|all users?|todos los usuarios|private|privados?)\b',
+    r'\b(show|mostrar|ver|listar)\b.*\b(chat|conversaciones?|mensajes?)\b.*\b(user|usuario|private|privado)\b',
 ]
 
 # Lista de nombres de tablas públicas permitidas
 TABLAS_PUBLICAS_PERMITIDAS = [
     'medallas_olimpicas'
 ]
+
+def es_consulta_deportiva_valida(pregunta: str) -> bool:
+    """
+    Detecta si una pregunta es una consulta válida sobre deportes/género que podría ser 
+    incorrectamente bloqueada por los filtros de seguridad.
+    """
+    pregunta_lower = pregunta.lower()
+    
+    # Patrones que indican consultas deportivas legítimas sobre género
+    patrones_deportivos_genero = [
+        r'\b(deportes?|sport|sports)\b.*\b(mujeres|hombres|women|men|femenino|masculino|female|male|género|genero|gender)\b',
+        r'\b(mujeres|hombres|women|men|femenino|masculino|female|male)\b.*\b(deportes?|sport|sports|medallas?|medals?)\b',
+        r'\b(más medallas|more medals|mejores?|better)\b.*\b(mujeres|hombres|women|men)\b',
+        r'\b(mujeres|women)\b.*\b(más|more|mejor|better)\b.*\b(hombres|men)\b',
+        r'\b(hombres|men)\b.*\b(más|more|mejor|better)\b.*\b(mujeres|women)\b',
+        r'\b(comparar|compare|diferencia|difference)\b.*\b(género|genero|gender|sexo)\b',
+        r'\b(participación|participation)\b.*\b(género|genero|gender|mujeres|hombres|women|men)\b'
+    ]
+    
+    for patron in patrones_deportivos_genero:
+        if re.search(patron, pregunta_lower):
+            print(f"✅ Consulta deportiva válida detectada (patrón: {patron})")
+            return True
+    
+    return False
 
 def detectar_consulta_sensible(pregunta: str) -> tuple[bool, str]:
     """
@@ -106,7 +131,12 @@ def detectar_consulta_sensible(pregunta: str) -> tuple[bool, str]:
     """
     pregunta_lower = pregunta.lower()
     
-    # Verificar cada patrón sensible
+    # PRIMERO: Verificar si es una consulta deportiva válida que debe ser permitida
+    if es_consulta_deportiva_valida(pregunta):
+        print(f"✅ Permitiendo consulta deportiva válida: {pregunta}")
+        return False, ""
+    
+    # SEGUNDO: Verificar cada patrón sensible
     for patron in PATRONES_CONSULTAS_SENSIBLES:
         if re.search(patron, pregunta_lower, re.IGNORECASE):
             print(f"🚫 Consulta sensible detectada. Patrón: {patron}")
@@ -203,11 +233,19 @@ def obtener_prompt_contexto(db: Session, contexto: str = "deportivo") -> str:
     # Prompt por defecto si no hay configuración
     return """Eres un asistente especializado en análisis de datos olímpicos de verano (1976-2008). 
     Tienes acceso a información completa sobre medallistas, ciudades anfitrionas, países, deportes y estadísticas olímpicas.
+    
+    CONTEXTO HISTÓRICO CRÍTICO:
+    - 1976-1988: Alemania estaba dividida en DOS países independientes:
+      * Alemania Occidental ("West Germany") 
+      * Alemania Oriental ("East Germany")
+    - 1992-2008: Alemania reunificada compite como un solo país ("Germany")
+    - NUNCA confundas "East Germany" (1976-1988) con "Germany" (1992-2008)
+    
     Proporciona respuestas precisas y profesionales. Puedes responder sobre:
     - Ciudades que han organizado múltiples Juegos Olímpicos
     - Medallistas y sus logros
     - Estadísticas por países, deportes y años
-    - Análisis comparativos entre olimpiadas
+    - Análisis comparativos entre olimpiadas, especialmente casos históricos como las dos Alemanias
     La base de datos contiene todas las medallas otorgadas en los Juegos Olímpicos de Verano desde Montreal 1976 hasta Beijing 2008."""
 
 def obtener_terminos_excluidos(db: Session, usuario: Usuario) -> List[str]:
@@ -421,6 +459,12 @@ RESTRICCIONES DE SEGURIDAD CRÍTICAS:
 - NO generes DDL (CREATE, DROP, ALTER) o DML (INSERT, UPDATE, DELETE)
 - Si la pregunta solicita información no disponible en medallas_olimpicas, responde que esa información no está disponible
 
+RESTRICCIÓN TEMPORAL CRÍTICA:
+- Los datos cubren EXCLUSIVAMENTE el período 1976-2008 (9 ediciones olímpicas)
+- NUNCA uses conocimiento externo de olimpiadas anteriores a 1976 o posteriores a 2008
+- Si una consulta no tiene resultados, acepta que es correcto para este período limitado
+- NO inventes ni asumas datos de otros períodos históricos
+
 0. La tabla se llama medallas_olimpicas.
 0.1. IMPORTANTE: Si hay contexto de conversación previa, usa esa información para interpretar referencias como "el país anterior", "ese atleta", "la medalla mencionada", etc.
 0.2. Las referencias contextuales deben resolverse usando la información del historial de conversación.
@@ -450,8 +494,10 @@ RESTRICCIONES DE SEGURIDAD CRÍTICAS:
 ESPECIAL - CONSULTAS SOBRE CIUDADES OLÍMPICAS:
 17. Para preguntas sobre ciudades que se repiten o ciudades anfitrionas múltiples:
     - Usa la columna 'city' que contiene las ciudades donde se realizaron las olimpiadas
-    - IMPORTANTE: Los datos cubren 1976-2008 (solo 9 ediciones) donde NINGUNA ciudad se repitió como sede
-    - Para encontrar ciudades repetidas: GROUP BY city HAVING COUNT(DISTINCT year) > 1 (resultará vacío para este período)
+    - CRÍTICO: Los datos cubren SOLO 1976-2008 (9 ediciones) donde NINGUNA ciudad se repitió como sede
+    - Ciudades del período: Montreal (1976), Moscow (1980), Los Angeles (1984), Seoul (1988), Barcelona (1992), Atlanta (1996), Sydney (2000), Athens (2004), Beijing (2008)
+    - Para encontrar ciudades repetidas: GROUP BY city HAVING COUNT(DISTINCT year) > 1 (resultará VACÍO para este período)
+    - IMPORTANTE: Si el resultado es vacío, NO inventes datos de otros períodos históricos
     - Para listar todas las ediciones: incluye year y city en los resultados
     - Si el usuario pregunta por ciudades repetidas, explica que en el período 1976-2008 no hay repeticiones
     - Ejemplos de consultas típicas de ciudades:
@@ -459,6 +505,7 @@ ESPECIAL - CONSULTAS SOBRE CIUDADES OLÍMPICAS:
       * "ciudades anfitrionas" → SELECT DISTINCT city, year FROM medallas_olimpicas ORDER BY year
       * "cuántas veces una ciudad específica" → WHERE city ILIKE '%ciudad%' GROUP BY city, year
     - Si no hay resultados para ciudades repetidas, es correcto: cada ciudad fue sede una sola vez en este período
+    - NUNCA menciones años anteriores a 1976 o posteriores a 2008
 
 ESPECIAL - CONSULTAS SOBRE DEPORTES Y PAÍSES:
 18. Para consultas sobre países que ganaron medallas en deportes específicos:
@@ -473,6 +520,60 @@ ESPECIAL - CONSULTAS SOBRE DEPORTES Y PAÍSES:
     - Usa gender = 'Men' y gender = 'Women' (no 'Male'/'Female')
     - Para análisis temporales incluye year en GROUP BY
     - Para comparaciones por país incluye country en SELECT y GROUP BY
+
+CRÍTICO - CONSULTAS DE MÁXIMOS POR GÉNERO:
+19.1. Para preguntas sobre "máximo medallista masculino Y femenino" o similares:
+    - NUNCA uses una sola consulta con LIMIT para ambos géneros
+    - Debes generar consultas SEPARADAS usando UNION o CTEs (Common Table Expressions)
+    - Ejemplo correcto para "máximo medallista de cada género":
+    
+    WITH ranked_athletes AS (
+        SELECT 
+            athlete, nombre_completo, gender, country,
+            COUNT(*) as total_medallas,
+            COUNT(CASE WHEN medal = 'Gold' THEN 1 END) as medallas_oro,
+            STRING_AGG(DISTINCT sport, ', ' ORDER BY sport) as deportes,
+            ROW_NUMBER() OVER (PARTITION BY gender ORDER BY COUNT(*) DESC) as rank_in_gender
+        FROM medallas_olimpicas 
+        WHERE gender IN ('Men', 'Women')
+        GROUP BY athlete, nombre_completo, gender, country
+    )
+    SELECT * FROM ranked_athletes WHERE rank_in_gender = 1 ORDER BY gender;
+
+19.2. Para consultas comparativas por género:
+    - Usa PARTITION BY gender para obtener rankings dentro de cada género
+    - Para "mejores de cada género": ROW_NUMBER() OVER (PARTITION BY gender ORDER BY criterio DESC)
+    - Para "comparar hombres vs mujeres": usa CASE statements o subconsultas separadas
+    - SIEMPRE asegúrate de obtener representación de ambos géneros cuando sea solicitado
+
+19.3. Patrones de preguntas que requieren consultas separadas por categoría:
+    - "máximo/mejor de cada..." → ROW_NUMBER() OVER (PARTITION BY categoria)
+    - "quien es el... masculino y femenino" → separar por gender
+    - "mejores de cada país/deporte/año" → PARTITION BY según la categoría
+    - "comparar entre..." → subconsultas o CTEs separadas
+    - NUNCA uses solo LIMIT cuando necesites representación de múltiples categorías
+
+CRÍTICO - CONTEXTO HISTÓRICO DE ALEMANIA (1976-2008):
+20. IMPORTANTE: Durante el período de datos (1976-2008), Alemania tuvo diferentes configuraciones:
+    - 1976-1988: Existían DOS países alemanes independientes:
+      * "West Germany" (Alemania Occidental/Federal) - código GER o FRG
+      * "East Germany" (Alemania Oriental/Democrática) - código GDR o DDR
+    - 1992-2008: Alemania REUNIFICADA como un solo país:
+      * "Germany" (Alemania unificada) - código GER
+    - NO hubo competencia olímpica en 1990 (año de reunificación)
+    
+21. Para consultas sobre "Alemania Oriental vs Occidental":
+    - Alemania Occidental: 1976, 1980, 1984, 1988 (como "West Germany")
+    - Alemania Oriental: 1976, 1980, 1984, 1988 (como "East Germany") 
+    - Alemania Reunificada: 1992, 1996, 2000, 2004, 2008 (como "Germany")
+    - NUNCA confundir "East Germany" con "Germany" de períodos posteriores
+    - Para comparar ambas, usar: WHERE country IN ('West Germany', 'East Germany')
+    
+22. Consultas SQL correctas para Alemania:
+    - Alemania Occidental: WHERE country = 'West Germany' AND year BETWEEN 1976 AND 1988
+    - Alemania Oriental: WHERE country = 'East Germany' AND year BETWEEN 1976 AND 1988  
+    - Alemania Unificada: WHERE country = 'Germany' AND year >= 1992
+    - Comparación histórica: usar CASE statements para agrupar períodos correctamente
 
 Responde solo con la consulta SQL, sin agregar nada más."""
 
@@ -747,10 +848,35 @@ Genera una respuesta en lenguaje natural, entendible para un usuario interesado 
 7. No agregues información que no esté explícitamente en los datos obtenidos.
 8. Si no hay datos disponibles, indica amablemente que no se encontraron resultados.
 9. No hagas supuestos ni agregues análisis a menos que se solicite.
+
+RESTRICCIONES CRÍTICAS - SOLO DATOS 1976-2008:
+7.1. NUNCA menciones años fuera del rango 1976-2008:
+    - NO menciones olimpiadas de 1972 o anteriores
+    - NO menciones olimpiadas de 2012 o posteriores
+    - NO inventes datos de años futuros (2024, 2028, etc.)
+7.2. Si una consulta no tiene resultados en el período 1976-2008:
+    - Explica claramente que los datos cubren SOLO 1976-2008
+    - Menciona que podrían existir casos en otros períodos no incluidos
+    - NUNCA inventes o asumas datos de otros períodos
+7.3. Para ciudades repetidas específicamente:
+    - En el período 1976-2008 NO hay ciudades que se repitan como sede
+    - Las ciudades fueron: Montreal (1976), Moscow (1980), Los Angeles (1984), Seoul (1988), Barcelona (1992), Atlanta (1996), Sydney (2000), Athens (2004), Beijing (2008)
+    - Cada ciudad fue sede UNA SOLA VEZ en este período
 10. Entrega el resultado de manera precisa y estructurada.
 11. Los resultados son para una conversación tipo chat, no saludes ni te despidas.
 12. IMPORTANTE: Nunca menciones detalles técnicos de la consulta.
 13. Si hay muchos resultados, resume los más relevantes y menciona el total.
+
+ESPECIAL - RESPUESTAS POR GÉNERO/CATEGORÍA:
+14. Si la pregunta solicita información de ambos géneros (ej: "máximo masculino y femenino"):
+    - SIEMPRE presenta ambos géneros claramente separados
+    - Usa encabezados como "Máximo Medallista Masculino:" y "Máximo Medallista Femenino:"
+    - Si los datos solo contienen un género, menciona que falta el otro
+    - NUNCA asumas que los primeros resultados representan ambos géneros
+15. Para consultas comparativas por categorías:
+    - Organiza la respuesta por categoría (país, deporte, género, año, etc.)
+    - Usa formato estructurado para facilitar la comparación
+    - Menciona explícitamente si alguna categoría no tiene datos disponibles
 
 """
 
